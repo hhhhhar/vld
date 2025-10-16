@@ -1,20 +1,21 @@
-import os
-import h5py
-import sapien.core as sapien
-# import sapien
-import mplib
-import numpy as np
-from sapien.utils.viewer import Viewer
-from transforms3d.euler import mat2euler
-from sapien.core import PinocchioModel
-from PIL import Image
-import json
-from IPython import embed
 import open3d as o3d
-
+from IPython import embed
+import json
+from PIL import Image
+from sapien.core import PinocchioModel
+from transforms3d.euler import mat2euler
+from sapien.utils.viewer import Viewer
+import numpy as np
+import mplib
+import sapien.core as sapien
+import h5py
+import os
 import sys
 sys.path.append('..')
-from utils import pose_relative, recover_pose, read_h5_file
+from utils import pose_relative, recover_pose, read_h5_file, pose2mat44,\
+    quat_wxyz_to_rotmat, rotation_matrix_to_quat_wxyz, normalize_quat, snap_quat
+# import sapien
+
 
 def quat_to_rotmat(q):
     """
@@ -61,9 +62,10 @@ def transform_points_by_pose(points, p, q, scale=1.0):
 
 
 class PlanningDemo:
-    def __init__(self, robot_prefix, target_id):
+    def __init__(self, robot_prefix, target_id, save_data=False):
         self.robot_prefix = robot_prefix
         self.target_id = target_id
+        self.save_data = save_data
         self.engine = sapien.Engine()
         self.renderer = sapien.SapienRenderer()
         self.engine.set_renderer(self.renderer)
@@ -105,7 +107,6 @@ class PlanningDemo:
         self.depthes = []
         self.cam_mat = []
         self.action_type = []
-        
 
         # Set initial joint positions
         init_qpos = [
@@ -230,7 +231,7 @@ class PlanningDemo:
         mat44[:3, :3] = np.stack([forward, left, up], axis=1)
         mat44[:3, 3] = camera_pos
         self.cam_mat.append(mat44)
-        
+
         # self.camera = self.scene.add_camera(
         #     name="camera",
         #     width=width,
@@ -239,13 +240,12 @@ class PlanningDemo:
         #     near=near,
         #     far=far,
         # )
-        
+
         # cam_pose = sapien.Pose(p=camera_pos)
         # cam_pose.set_rpy(rpy)
         # self.camera.set_entity_pose(cam_pose)
         self.viewer.set_camera_pose(sapien.Pose(mat44))
-    
-        
+
         # 创建 URDF Loader
         loader = self.scene.create_urdf_loader()
         loader.scale = scale
@@ -288,27 +288,27 @@ class PlanningDemo:
             joint_acc_limits=np.ones(7),
         )
 
-
     def data2h5(self, h5_path):
-        with h5py.File(h5_path,"w") as f:
+        with h5py.File(h5_path, "w") as f:
             f.create_dataset("scaled_bbox", data=np.array(self.scaled_bbox))
             f.create_dataset("poses", data=self.poses)
             f.create_dataset("actions", data=self.actions)
             f.create_dataset("rgbs", data=np.array(self.rgbs))
             f.create_dataset("depthes", data=np.array(self.depthes))
             f.create_dataset("cam_mat", data=np.array(self.cam_mat))
-            f.create_dataset("action_type", data=np.array(self.action_type, dtype=object))
+            f.create_dataset("action_type", data=np.array(
+                self.action_type, dtype=object))
         print('save ok')
-    
+
     def pose2np(self, pose):
         q = np.array(pose.q)
         p = np.array(pose.p)
         return np.concatenate((p, q))
-    
+
     def append_data(self, former_pos):
         cur_pos = self.hand_obj.get_entity_pose()
         self.poses.append(self.pose2np(cur_pos))
-        
+
         # 获取 RGBA 浮点图（H, W, 4），每通道在 [0,1]
         rgba = self.viewer.window.get_picture('Color')
         # 将 RGBA 转换成 uint8 RGB
@@ -317,15 +317,17 @@ class PlanningDemo:
         img = Image.fromarray(rgb_img)
 
         # 获取 position / 深度 / segmentation
-        pos = self.viewer.window.get_picture('Position')  # shape (H, W, 4)，前三通道为 3D 点，第四通道为 z-buffer 值
-        depth = -pos[..., 2]  # 根据文档，z 是负方向的深度值 :contentReference[oaicite:6]{index=6}
+        # shape (H, W, 4)，前三通道为 3D 点，第四通道为 z-buffer 值
+        pos = self.viewer.window.get_picture('Position')
+        # 根据文档，z 是负方向的深度值 :contentReference[oaicite:6]{index=6}
+        depth = -pos[..., 2]
 
         self.rgbs.append(rgb_img)
         self.depthes.append(depth)
-        self.actions.append(pose_relative(self.pose2np(former_pos), self.pose2np(cur_pos)))
-        
+        self.actions.append(pose_relative(
+            self.pose2np(former_pos), self.pose2np(cur_pos)))
 
-    def follow_path(self, result, save_data):
+    def follow_path(self, result):
         n_step = result["position"].shape[0]
         for i in range(n_step):
             former_pos = self.hand_obj.get_entity_pose()
@@ -340,11 +342,11 @@ class PlanningDemo:
                     result["velocity"][i][j]
                 )
             self.scene.step()
-            if i % 4 == 3:
+            if i % 12 == 3:
                 self.scene.update_render()
                 self.viewer.render()
                 self.scene.update_render()
-                if save_data:
+                if self.save_data:
                     self.append_data(former_pos)
 
     def open_gripper(self):
@@ -373,18 +375,17 @@ class PlanningDemo:
                 self.scene.update_render()
                 self.viewer.render()
         print("close over")
-            
 
-    def move_to_pose_with_RRTConnect(self, pose, save_data):
+    def move_to_pose_with_RRTConnect(self, pose):
         result = self.planner.plan(
             pose, self.robot.get_qpos(), time_step=1 / 250)
         if result["status"] != "Success":
             print(result["status"])
             return -1
-        self.follow_path(result, save_data)
+        self.follow_path(result)
         return 0
 
-    def move_to_pose_with_screw(self, pose, save_data):
+    def move_to_pose_with_screw(self, pose):
         result = self.planner.plan_screw(
             pose, self.robot.get_qpos(), qpos_step=1 / 400, time_step=1 / 400)
         if result["status"] != "Success":
@@ -393,24 +394,25 @@ class PlanningDemo:
             if result["status"] != "Success":
                 print(result["status"])
                 return -1
-        self.follow_path(result, save_data)
+        self.follow_path(result)
         return 0
 
-    def move_to_pose(self, pose, with_screw, save_data=False):
+    def move_to_pose(self, pose, with_screw):
         res = -1
         root = self.robot.get_root_pose()
         pose[:3] -= root.p
+        mat44 = pose2mat44(pose)
+        pose = sapien.Pose(mat44)
+        pose = self.pose2np(pose)
         self.hand_obj.get_entity_pose()
         if with_screw:
-            res = self.move_to_pose_with_screw(pose, save_data)
+            res = self.move_to_pose_with_screw(pose)
         else:
-            res = self.move_to_pose_with_RRTConnect(pose, save_data)
-        
+            res = self.move_to_pose_with_RRTConnect(pose)
+
         if res == -1:
             print("move fail")
         else:
-            print(f'target_pose:{pose}')
-            input(f'hand_pose:{self.hand_obj.get_entity_pose()}')
             print("move success")
 
     # def get_pic(self, dir_name: str, name: str):
@@ -429,7 +431,6 @@ class PlanningDemo:
         # pose = [0.5, 0.0, 0.5, 0, 1, 0, 0]
         # res = self.move_to_pose(pose, with_screw)
 
-        
         center = self.scaled_bbox.mean(0).tolist()
         center[2] += 0.2
         # hand = self.robot.find_link_by_name("panda_hand").get_pose()
@@ -439,8 +440,7 @@ class PlanningDemo:
         # print(root)
         # input(target)
         pose = [target[0], target[1], target[2], 0, 1, 0, 0]  # 竖直
-        
-        
+
         # pose = [0.5, 0.0, 0.9, 0, 1, 0, 0]
         self.move_to_pose(pose, with_screw)
 
@@ -459,7 +459,7 @@ class PlanningDemo:
         # self.move_to_pose(pose, with_screw)
         self.close_gripper()
         print(self.hand_obj.get_entity_pose())
-        
+
         pose[2] -= 0.08
         print(pose)
         self.move_to_pose(pose, with_screw)
@@ -495,7 +495,8 @@ class PlanningDemo:
         #     pose[2] += 0.12
         #     self.move_to_pose(pose, with_screw)
         print(self.action_type)
-        self.data2h5("test.h5")
+        if self.save_data:
+            self.data2h5("/home/huanganran/field/test.h5")
         while not self.viewer.closed:
             for _ in range(4):  # render every 4 steps
                 qf = self.robot.compute_passive_force(
@@ -510,32 +511,32 @@ class PlanningDemo:
     def test_h5(self, h5_path):
         data = read_h5_file(h5_path)
         self.test_action(data)
-    
+
     def test_action(self, data):
         scaled_bbox = data.get("scaled_bbox")   # 可能是 numpy array 或 list
-        poses = data.get("poses")               # 可能是 (N,7) ndarray 或 list of arrays
+        # 可能是 (N,7) ndarray 或 list of arrays
+        poses = data.get("poses")
         actions = data.get("actions")
         rgbs = data.get("rgbs")                 # 可能是 (N,H,W,3) ndarray
         depthes = data.get("depthes")
         cam_mat = data.get("cam_mat")
         action_type = data.get("action_type")
-        
-        # in_pose = poses[0]
-        init_pose = [0.45, 0.0, 0.2, 0, 1, 0, 0]
-        cur_pose = self.pose2np(self.hand_obj.get_entity_pose())
-        action = pose_relative(cur_pose, init_pose)
-        tar_pose = recover_pose(cur_pose, action)
-        self.move_to_pose(tar_pose, True)
-        
+
+        init_pose = poses[0]
+        init_pose[3:] = [0, 1, 0, 0]
+        # init_pose = [0.45, 0.0, 0.2, 0, 1, 0, 0]
+        self.move_to_pose(init_pose, True)
+
         for action in actions:
             cur_pose = self.hand_obj.get_entity_pose()
             cur_pose = self.pose2np(cur_pose)
             target_pose = recover_pose(cur_pose, action)
+            target_pose[3:] = [0, 1, 0, 0]
             self.move_to_pose(target_pose, True)
             # print(center)
             # print(root)
             # input(target)
-        
+
         while not self.viewer.closed:
             for _ in range(4):  # render every 4 steps
                 qf = self.robot.compute_passive_force(
@@ -551,6 +552,6 @@ class PlanningDemo:
 if __name__ == "__main__":
     robot_prefix = "/home/huanganran/field/vld/assets/robot/panda/panda"
     target_id = 100392
-    demo = PlanningDemo(robot_prefix, target_id)
+    demo = PlanningDemo(robot_prefix, target_id, True)
     # demo.demo()
-    demo.test_h5("test.h5")
+    demo.test_h5("/home/huanganran/field/test.h5")

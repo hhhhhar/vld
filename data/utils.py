@@ -21,7 +21,7 @@ def pos2pcd(self,pos, rgba):
     
 def normalize_quat(q):
     """Normalize quaternion given as [w,x,y,z]."""
-    q = np.asarray(q, dtype=float)
+    q = np.asarray(q, dtype=np.float64)
     n = np.linalg.norm(q)
     if n < 1e-12:
         raise ValueError("Quaternion norm too small to normalize.")
@@ -145,6 +145,13 @@ def rotation_matrix_to_quat_wxyz(R):
     q /= np.linalg.norm(q)
     return q
 
+def pose2mat44(pose):
+    mat44 = np.eye(4)
+    mat33 = quat_wxyz_to_rotmat(pose[3:])
+    mat44[0:3, 0:3] = mat33
+    mat44[0:3, 3] = pose[0:3]
+    return mat44
+
 def try_deserialize_bytes(x):
     """尝试把 bytes 反序列化成原始对象（优先 utf-8 字符串，然后 pickle）。"""
     if not isinstance(x, (bytes, bytearray)):
@@ -218,6 +225,39 @@ def read_h5_file(path):
                 print(f"  {name}: type={type(val)}; value sample={val if hasattr(val,'shape') or isinstance(val,(int,float,str)) else str(val)[:100]}")
             result[name] = val
     return result
+
+def quat_wxyz_to_rotmat(q):
+    """
+    将四元数 (w,x,y,z) 转为 3x3 旋转矩阵
+    自动归一化四元数，并保证旋转矩阵正交性
+    """
+    q = normalize_quat(q)
+    w, x, y, z = q
+
+    # 构建旋转矩阵公式
+    R = np.array([
+        [1-2*(y**2 + z**2),   2*(x*y - z*w),     2*(x*z + y*w)],
+        [2*(x*y + z*w),       1-2*(x**2 + z**2), 2*(y*z - x*w)],
+        [2*(x*z - y*w),       2*(y*z + x*w),     1-2*(x**2 + y**2)]
+    ])
+
+    # 用 SVD 做正交修正（确保 det(R)=1）
+    U, _, Vt = np.linalg.svd(R)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        # 避免反射矩阵
+        U[:, -1] *= -1
+        R = U @ Vt
+    return R
+
+def snap_quat(q, tol=1e-2):
+    q = np.asarray(q, dtype=float).copy()
+    # 小于 tol 的置零
+    q[np.abs(q) < tol] = 0.0
+    # 接近 ±1 的分量钳到 ±1
+    q[np.isclose(np.abs(q), 1.0, atol=tol)] = np.sign(q[np.isclose(np.abs(q), 1.0, atol=tol)]) * 1.0
+    return normalize_quat(q)
+
 
 # --- 简短示例 / 测试 ---
 if __name__ == "__main__":
