@@ -12,8 +12,8 @@ import h5py
 import os
 import sys
 sys.path.append('..')
-from utils import pose_relative, recover_pose, read_h5_file, pose2mat44,\
-    quat_wxyz_to_rotmat, rotation_matrix_to_quat_wxyz, normalize_quat, snap_quat
+# from utils import pose_relative, recover_pose, read_h5_file, pose2mat44,\
+#     quat_wxyz_to_rotmat, rotation_matrix_to_quat_wxyz, normalize_quat, snap_quat
 # import sapien
 
 
@@ -168,7 +168,7 @@ class PlanningDemo:
 
         # drawer
         self.get_bbox()
-        target_path = f"/mnt/4dba1798-fc0d-4700-a472-04acb2f7b630/hhhar/partnet/{self.target_id}/mobility_annotation_gapartnet.urdf"
+        target_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.target_id}/mobility_annotation_gapartnet.urdf"
         self.load_urdf_in_sapien(target_path, 0.2, pos=np.array(
             [0.3, 0.0, 0.03]), q=np.array([0.7, 0.0, 0.7, 0.0]))
 
@@ -183,7 +183,7 @@ class PlanningDemo:
         self.setup_planner(robot_prefix)
 
     def get_bbox(self):
-        anno_path = f"/mnt/4dba1798-fc0d-4700-a472-04acb2f7b630/hhhar/partnet/{self.target_id}/link_annotation_gapartnet.json"
+        anno_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.target_id}/link_annotation_gapartnet.json"
         with open(anno_path, "r") as f:
             anno = json.load(f)
         target_anno = anno[1]
@@ -305,27 +305,27 @@ class PlanningDemo:
         p = np.array(pose.p)
         return np.concatenate((p, q))
 
-    def append_data(self, former_pos):
-        cur_pos = self.hand_obj.get_entity_pose()
-        self.poses.append(self.pose2np(cur_pos))
+    # def append_data(self, former_pos):
+    #     cur_pos = self.hand_obj.get_entity_pose()
+    #     self.poses.append(self.pose2np(cur_pos))
 
-        # 获取 RGBA 浮点图（H, W, 4），每通道在 [0,1]
-        rgba = self.viewer.window.get_picture('Color')
-        # 将 RGBA 转换成 uint8 RGB
-        rgba8 = (rgba * 255).clip(0, 255).astype(np.uint8)
-        rgb_img = rgba8[..., :3]
-        img = Image.fromarray(rgb_img)
+    #     # 获取 RGBA 浮点图（H, W, 4），每通道在 [0,1]
+    #     rgba = self.viewer.window.get_picture('Color')
+    #     # 将 RGBA 转换成 uint8 RGB
+    #     rgba8 = (rgba * 255).clip(0, 255).astype(np.uint8)
+    #     rgb_img = rgba8[..., :3]
+    #     img = Image.fromarray(rgb_img)
 
-        # 获取 position / 深度 / segmentation
-        # shape (H, W, 4)，前三通道为 3D 点，第四通道为 z-buffer 值
-        pos = self.viewer.window.get_picture('Position')
-        # 根据文档，z 是负方向的深度值 :contentReference[oaicite:6]{index=6}
-        depth = -pos[..., 2]
+    #     # 获取 position / 深度 / segmentation
+    #     # shape (H, W, 4)，前三通道为 3D 点，第四通道为 z-buffer 值
+    #     pos = self.viewer.window.get_picture('Position')
+    #     # 根据文档，z 是负方向的深度值 :contentReference[oaicite:6]{index=6}
+    #     depth = -pos[..., 2]
 
-        self.rgbs.append(rgb_img)
-        self.depthes.append(depth)
-        self.actions.append(pose_relative(
-            self.pose2np(former_pos), self.pose2np(cur_pos)))
+    #     self.rgbs.append(rgb_img)
+    #     self.depthes.append(depth)
+    #     self.actions.append(pose_relative(
+    #         self.pose2np(former_pos), self.pose2np(cur_pos)))
 
     def follow_path(self, result):
         n_step = result["position"].shape[0]
@@ -397,23 +397,23 @@ class PlanningDemo:
         self.follow_path(result)
         return 0
 
-    def move_to_pose(self, pose, with_screw):
-        res = -1
-        root = self.robot.get_root_pose()
-        pose[:3] -= root.p
-        mat44 = pose2mat44(pose)
-        pose = sapien.Pose(mat44)
-        pose = self.pose2np(pose)
-        self.hand_obj.get_entity_pose()
-        if with_screw:
-            res = self.move_to_pose_with_screw(pose)
-        else:
-            res = self.move_to_pose_with_RRTConnect(pose)
+    # def move_to_pose(self, pose, with_screw):
+    #     res = -1
+    #     root = self.robot.get_root_pose()
+    #     pose[:3] -= root.p
+    #     mat44 = pose2mat44(pose)
+    #     pose = sapien.Pose(mat44)
+    #     pose = self.pose2np(pose)
+    #     self.hand_obj.get_entity_pose()
+    #     if with_screw:
+    #         res = self.move_to_pose_with_screw(pose)
+    #     else:
+    #         res = self.move_to_pose_with_RRTConnect(pose)
 
-        if res == -1:
-            print("move fail")
-        else:
-            print("move success")
+    #     if res == -1:
+    #         print("move fail")
+    #     else:
+    #         print("move success")
 
     # def get_pic(self, dir_name: str, name: str):
     #     if os.path.exists(f"{dir_name}"):
@@ -431,72 +431,72 @@ class PlanningDemo:
         # pose = [0.5, 0.0, 0.5, 0, 1, 0, 0]
         # res = self.move_to_pose(pose, with_screw)
 
-        center = self.scaled_bbox.mean(0).tolist()
-        center[2] += 0.2
-        # hand = self.robot.find_link_by_name("panda_hand").get_pose()
-        root = self.robot.get_root_pose()
-        target = center - root.p
-        # print(center)
-        # print(root)
-        # input(target)
-        pose = [target[0], target[1], target[2], 0, 1, 0, 0]  # 竖直
+        # center = self.scaled_bbox.mean(0).tolist()
+        # center[2] += 0.2
+        # # hand = self.robot.find_link_by_name("panda_hand").get_pose()
+        # root = self.robot.get_root_pose()
+        # target = center - root.p
+        # # print(center)
+        # # print(root)
+        # # input(target)
+        # pose = [target[0], target[1], target[2], 0, 1, 0, 0]  # 竖直
 
-        # pose = [0.5, 0.0, 0.9, 0, 1, 0, 0]
-        self.move_to_pose(pose, with_screw)
+        # # pose = [0.5, 0.0, 0.9, 0, 1, 0, 0]
+        # self.move_to_pose(pose, with_screw)
 
-        # self.open_gripper()
+        # # self.open_gripper()
 
-        # self.get_pic("washer_1", "obs")
-        # pose[0] += 0.03
+        # # self.get_pic("washer_1", "obs")
+        # # pose[0] += 0.03
+        # # # self.move_to_pose(pose, with_screw)
+        # # self.planner.IK(pose, self.robot.get_qpos())
+
+        # # pose[2] -= 0.1
         # # self.move_to_pose(pose, with_screw)
-        # self.planner.IK(pose, self.robot.get_qpos())
+        # # for i, joint in enumerate(self.part.get_joints()):
+        # #     if i == 2:
+        # #         joint.set_limits([[0.0, 10.0]])
+        # # self.move_to_pose(pose, with_screw)
+        # self.close_gripper()
+        # print(self.hand_obj.get_entity_pose())
 
-        # pose[2] -= 0.1
+        # pose[2] -= 0.08
+        # print(pose)
         # self.move_to_pose(pose, with_screw)
-        # for i, joint in enumerate(self.part.get_joints()):
-        #     if i == 2:
-        #         joint.set_limits([[0.0, 10.0]])
-        # self.move_to_pose(pose, with_screw)
-        self.close_gripper()
-        print(self.hand_obj.get_entity_pose())
+        # print(self.hand_obj.get_entity_pose())
 
-        pose[2] -= 0.08
-        print(pose)
-        self.move_to_pose(pose, with_screw)
-        print(self.hand_obj.get_entity_pose())
+        # # pose[2] -= 0.03
+        # # pose[0] -= 0.1
+        # # self.move_to_pose(pose, with_screw)
+        # # self.contacts = self.scene.get_contacts()
+        # # print(self.contacts)
+        # # pose[0] -= 0.21
+        # # self.move_to_pose(pose, with_screw)
+        # # self.get_pic("washer_1", "over")
 
-        # pose[2] -= 0.03
-        # pose[0] -= 0.1
-        # self.move_to_pose(pose, with_screw)
-        # self.contacts = self.scene.get_contacts()
-        # print(self.contacts)
-        # pose[0] -= 0.21
-        # self.move_to_pose(pose, with_screw)
-        # self.get_pic("washer_1", "over")
-
-        # poses = [[0.4, 0.3, 0.12, 0, 1, 0, 0],
-        #         [0.2, -0.3, 0.08, 0, 1, 0, 0],
-        #         [0.6, 0.1, 0.14, 0, 1, 0, 0]]
-        # for i in range(3):
-        #     pose = poses[i]
-        #     pose[2] += 0.2
-        #     self.move_to_pose(pose, with_screw)
-        #     self.open_gripper()
-        #     pose[2] -= 0.12
-        #     self.move_to_pose(pose, with_screw)
-        #     self.close_gripper()
-        #     pose[2] += 0.12
-        #     self.move_to_pose(pose, with_screw)
-        #     pose[0] += 0.1
-        #     self.move_to_pose(pose, with_screw)
-        #     pose[2] -= 0.12
-        #     self.move_to_pose(pose, with_screw)
-        #     self.open_gripper()
-        #     pose[2] += 0.12
-        #     self.move_to_pose(pose, with_screw)
-        print(self.action_type)
-        if self.save_data:
-            self.data2h5("/home/huanganran/field/test.h5")
+        # # poses = [[0.4, 0.3, 0.12, 0, 1, 0, 0],
+        # #         [0.2, -0.3, 0.08, 0, 1, 0, 0],
+        # #         [0.6, 0.1, 0.14, 0, 1, 0, 0]]
+        # # for i in range(3):
+        # #     pose = poses[i]
+        # #     pose[2] += 0.2
+        # #     self.move_to_pose(pose, with_screw)
+        # #     self.open_gripper()
+        # #     pose[2] -= 0.12
+        # #     self.move_to_pose(pose, with_screw)
+        # #     self.close_gripper()
+        # #     pose[2] += 0.12
+        # #     self.move_to_pose(pose, with_screw)
+        # #     pose[0] += 0.1
+        # #     self.move_to_pose(pose, with_screw)
+        # #     pose[2] -= 0.12
+        # #     self.move_to_pose(pose, with_screw)
+        # #     self.open_gripper()
+        # #     pose[2] += 0.12
+        # #     self.move_to_pose(pose, with_screw)
+        # print(self.action_type)
+        # if self.save_data:
+        #     self.data2h5("/home/huanganran/field/test.h5")
         while not self.viewer.closed:
             for _ in range(4):  # render every 4 steps
                 qf = self.robot.compute_passive_force(
@@ -508,50 +508,50 @@ class PlanningDemo:
             self.scene.update_render()
             self.viewer.render()
 
-    def test_h5(self, h5_path):
-        data = read_h5_file(h5_path)
-        self.test_action(data)
+    # def test_h5(self, h5_path):
+    #     data = read_h5_file(h5_path)
+    #     self.test_action(data)
 
-    def test_action(self, data):
-        scaled_bbox = data.get("scaled_bbox")   # 可能是 numpy array 或 list
-        # 可能是 (N,7) ndarray 或 list of arrays
-        poses = data.get("poses")
-        actions = data.get("actions")
-        rgbs = data.get("rgbs")                 # 可能是 (N,H,W,3) ndarray
-        depthes = data.get("depthes")
-        cam_mat = data.get("cam_mat")
-        action_type = data.get("action_type")
+    # def test_action(self, data):
+    #     scaled_bbox = data.get("scaled_bbox")   # 可能是 numpy array 或 list
+    #     # 可能是 (N,7) ndarray 或 list of arrays
+    #     poses = data.get("poses")
+    #     actions = data.get("actions")
+    #     rgbs = data.get("rgbs")                 # 可能是 (N,H,W,3) ndarray
+    #     depthes = data.get("depthes")
+    #     cam_mat = data.get("cam_mat")
+    #     action_type = data.get("action_type")
 
-        init_pose = poses[0]
-        init_pose[3:] = [0, 1, 0, 0]
-        # init_pose = [0.45, 0.0, 0.2, 0, 1, 0, 0]
-        self.move_to_pose(init_pose, True)
+    #     init_pose = poses[0]
+    #     init_pose[3:] = [0, 1, 0, 0]
+    #     # init_pose = [0.45, 0.0, 0.2, 0, 1, 0, 0]
+    #     self.move_to_pose(init_pose, True)
 
-        for action in actions:
-            cur_pose = self.hand_obj.get_entity_pose()
-            cur_pose = self.pose2np(cur_pose)
-            target_pose = recover_pose(cur_pose, action)
-            target_pose[3:] = [0, 1, 0, 0]
-            self.move_to_pose(target_pose, True)
-            # print(center)
-            # print(root)
-            # input(target)
+    #     for action in actions:
+    #         cur_pose = self.hand_obj.get_entity_pose()
+    #         cur_pose = self.pose2np(cur_pose)
+    #         target_pose = recover_pose(cur_pose, action)
+    #         target_pose[3:] = [0, 1, 0, 0]
+    #         self.move_to_pose(target_pose, True)
+    #         # print(center)
+    #         # print(root)
+    #         # input(target)
 
-        while not self.viewer.closed:
-            for _ in range(4):  # render every 4 steps
-                qf = self.robot.compute_passive_force(
-                    gravity=True,
-                    coriolis_and_centrifugal=True,
-                )
-                self.robot.set_qf(qf)
-                self.scene.step()
-            self.scene.update_render()
-            self.viewer.render()
+    #     while not self.viewer.closed:
+    #         for _ in range(4):  # render every 4 steps
+    #             qf = self.robot.compute_passive_force(
+    #                 gravity=True,
+    #                 coriolis_and_centrifugal=True,
+    #             )
+    #             self.robot.set_qf(qf)
+    #             self.scene.step()
+    #         self.scene.update_render()
+    #         self.viewer.render()
 
 
 if __name__ == "__main__":
-    robot_prefix = "/home/huanganran/field/vld/assets/robot/panda/panda"
-    target_id = 100392
+    robot_prefix = "/home/hhhar/liuliu/vld/assets/robot/panda/panda"
+    target_id = 13095
     demo = PlanningDemo(robot_prefix, target_id, True)
-    # demo.demo()
-    demo.test_h5("/home/huanganran/field/test.h5")
+    demo.demo()
+    # demo.test_h5("/home/huanganran/field/test.h5")
