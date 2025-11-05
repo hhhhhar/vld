@@ -1,0 +1,15 @@
+[2025-11-04 01:51:59,770][ogn_registration][INFO] - Looking for Python nodes to register in omni.physx.fabric-107.3.18
+[2025-11-04 01:51:59,770][ogn_registration][INFO] -  -> Registered nodes from module omni.physxfabric at /home/hhhar/anaconda3/envs/vlddd/lib/python3.11/site-packages/isaacsim/extscache/omni.physx.fabric-107.3.18+107.3.1.lx64.r.cp311.u353
+[2025-11-04 01:51:59,770][ogn_registration][INFO] - Registering nodes in /home/hhhar/anaconda3/envs/vlddd/lib/python3.11/site-packages/isaacsim/extscache/omni.physx.fabric-107.3.18+107.3.1.lx64.r.cp311.u353 imported as omni.physxfabric with AutoNode config {}
+[2025-11-04 01:51:59,770][ogn_registration][INFO] - Registering Python Node Types from omni.physxfabric at /home/hhhar/anaconda3/envs/vlddd/lib/python3.11/site-packages/isaacsim/extscache/omni.physx.fabric-107.3.18+107.3.1.lx64.r.cp311.u353 in omni.physx.fabric
+[2025-11-04 01:51:59,770][ogn_registration][INFO] - ========================================================================================================================
+[2025-11-04 01:51:59,771][ogn_registration][INFO] - No dependency on omni.graph, therefore no nodes to register in omni.physx.fabric
+[2025-11-04 01:51:59,772][ogn_registration][INFO] - ...None found, no registration to do
+[2025-11-04 01:51:59,772][ogn_registration][INFO] - ...Skipping: No OmniGraph presence in the module omni.physxfabric - No nodes in this module, do not remember it
+[2025-11-04 01:51:59,772][ogn_registration][INFO] - Destroying registration record for omni.physx.fabric
+[2025-11-04 01:51:59,772][ogn_registration][INFO] - OGN register omni.physx.fabric-107.3.18 took 1735916.000000
+[2025-11-04 01:52:08,639][matplotlib.image][WARNING] - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [121.0..129.0].
+[2025-11-04 01:52:27,743][matplotlib.image][WARNING] - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [-1.0..0.99980295].
+[2025-11-04 01:52:35,370][matplotlib.image][WARNING] - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [0.0..255.0].
+[2025-11-04 01:52:39,092][matplotlib.image][WARNING] - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [0.0..255.0].
+[2025-11-04 01:52:48,046][matplotlib.image][WARNING] - Clipping input data to the valid range for imshow with RGB data ([0..1] for floats or [0..255] for integers). Got range [25.0..255.0].

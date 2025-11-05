@@ -1,24 +1,3 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
-"""
-This script demonstrates how to use the differential inverse kinematics controller with the simulator.
-
-The differential IK controller can be configured in different modes. It uses the Jacobians computed by
-PhysX. This helps perform parallelized computation of the inverse kinematics.
-
-.. code-block:: bash
-
-    # Usage
-    ./isaaclab.sh -p scripts/tutorials/05_controllers/run_diff_ik.py
-
-"""
-
-"""Launch Isaac Sim Simulator first."""
-
-
 import os
 
 from isaaclab.app import AppLauncher
@@ -41,7 +20,6 @@ args_cli = parser.parse_args()
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
-
 
 from IPython import embed
 from omegaconf import DictConfig
@@ -73,11 +51,31 @@ import json
 import torch
 import random
 from matplotlib import pyplot as plt
-"""Rest everything follows."""
+import h5py
+import matplotlib.pyplot as plt
+import numpy as np
+from utils import quat_to_rotmat, transform_points_by_pose
 
-##
-# Pre-defined configs
-##
+def print_h5_tree(h5_path):
+    def visitor(name, obj):
+        # 计算缩进层级
+        depth = name.count('/')
+        indent = "  " * depth
+
+        if isinstance(obj, h5py.Group):
+            print(f"{indent}+ [G] {name}/")
+        elif isinstance(obj, h5py.Dataset):
+            shape = obj.shape
+            dtype = obj.dtype
+            print(f"{indent}- [D] {name}    shape={shape} dtype={dtype}")
+
+    with h5py.File(h5_path, 'r') as f:
+        print(f"H5 file: {h5_path}")
+        f.visititems(visitor)
+        for img in f["rgb"]:
+            plt.figure(figsize=(10, 6))
+            plt.imshow(img)
+            plt.show()
 
 TARGET_SCALE = 0.2
 TARGET_INIT_POS = (0.5, 0.0, 0.2)
@@ -105,11 +103,9 @@ MY_NEW_OBJECT_CFG = ArticulationCfg(
         )
     })
 
-
 def _print(msg):
     print('----------------------------------------------------------------------')
     print(f"msg:{msg}")
-
 
 bbox_pts_cfg = VisualizationMarkersCfg(
     prim_path="/World/Visuals/testMarkers",
@@ -119,7 +115,6 @@ bbox_pts_cfg = VisualizationMarkersCfg(
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(1.0, 0.0, 0.0)),
         ), })
-
 
 @configclass
 class TableTopSceneCfg(InteractiveSceneCfg):
@@ -159,55 +154,10 @@ class TableTopSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/MyNewObject"  # 给它一个唯一的场景路径
     )
 
-
-def quat_to_rotmat(q):
-    """
-    q: array-like [w, x, y, z]
-    returns 3x3 rotation matrix
-    """
-    q = np.asarray(q, dtype=float)
-    if q.shape != (4,):
-        q = q.ravel()[:4]
-    # normalize to be safe
-    q = q / np.linalg.norm(q)
-    w, x, y, z = q
-    # 3x3 rotation matrix (Hamilton convention)
-    R = np.array([
-        [1 - 2*(y*y + z*z),     2*(x*y - z*w),     2*(x*z + y*w)],
-        [2*(x*y + z*w), 1 - 2*(x*x + z*z),     2*(y*z - x*w)],
-        [2*(x*z - y*w),     2*(y*z + x*w), 1 - 2*(x*x + y*y)]
-    ], dtype=float)
-    return R
-
-
-def transform_points_by_pose(points, p, q, scale=1.0):
-    """
-    points: (N,3) np.array in local coordinates
-    p: (3,) translation in world coords
-    q: [w,x,y,z] quaternion (world orientation of the local frame)
-    scale: scalar or (3,) array, applied in local frame before rotation/translation
-    returns transformed_points: (N,3)
-    """
-    pts = np.asarray(points, dtype=float).reshape(-1, 3)
-    # apply local scale (support scalar or per-axis)
-    scale = np.asarray(scale, dtype=float)
-    if scale.size == 1:
-        pts = pts * float(scale)
-    else:
-        pts = pts * scale.reshape(1, 3)
-    # rotate
-    R = quat_to_rotmat(q)
-    pts_rot = pts.dot(R.T)   # (N,3)
-    # translate
-    return pts_rot + np.asarray(p).reshape(1, 3)
-
-
 class PlanningDemo:
-    def __init__(self, target_id, camera_id, save_data=False, output_prefix="./output/camera"):
-        self.target_id = target_id
-        self.save_data = save_data
-        self.camera_id = camera_id
-        self.camera = []
+    def __init__(self, data_prefix="/home/hhhar/liuliu/vld/data/regression/data_res"):
+        # self.target_id = -1
+        self.camera_id = -1
         self.bbox = []
         self.scaled_bbox = []
         self.poses = []
@@ -217,139 +167,29 @@ class PlanningDemo:
         self.cam_mat = []
         self.action_type = []
         self.part_num = -1
-        self.output_prefix = output_prefix
-        self.data_dict = {}
-        self.define_sensor()
-        self.part_id = -1
-        
-    def define_sensor(self):
-        """Defines the camera sensor to add to the scene."""
-        # Setup camera sensor
-        # In contrast to the ray-cast camera, we spawn the prim at these locations.
-        # This means the camera sensor will be attached to these prims.
-        prim_utils.create_prim("/World/Origin_00", "Xform")
-        prim_utils.create_prim("/World/Origin_01", "Xform")
-        camera_cfg = CameraCfg(
-            prim_path="/World/Origin_.*/CameraSensor",
-            update_period=0,
-            height=480,
-            width=640,
-            data_types=[
-                "rgb",
-                "distance_to_image_plane",
-                "normals",
-                "semantic_segmentation",
-                "instance_segmentation_fast",
-                "instance_id_segmentation_fast",
-            ],
-            colorize_semantic_segmentation=True,
-            colorize_instance_id_segmentation=True,
-            colorize_instance_segmentation=True,
-            spawn=sim_utils.PinholeCameraCfg(
-                focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-            ),
-        )
-        # Create camera
-        self.camera = Camera(cfg=camera_cfg)
+        # self.part_id = -1
+        self.data_prefix = data_prefix
+    
+    def load_h5data(self, h5_path):
+        def visitor(name, obj):
+            # 计算缩进层级
+            depth = name.count('/')
+            indent = "  " * depth
 
-    def data2h5(self, h5_path):
-        with h5py.File(h5_path, "w") as f:
-            for key in self.data_dict.keys():
-                f.create_dataset(key, data=self.data_dict[key])
-            f.flush()
-        print('this turn save ok')
+            if isinstance(obj, h5py.Group):
+                print(f"{indent}+ [G] {name}/")
+            elif isinstance(obj, h5py.Dataset):
+                shape = obj.shape
+                dtype = obj.dtype
+                print(f"{indent}- [D] {name}    shape={shape} dtype={dtype}")
 
-    def get_bbox(self, pos=TARGET_INIT_POS, rot=TARGET_INIT_ROT, scale=TARGET_SCALE):
-        anno_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.target_id}/link_annotation_gapartnet.json"
-        with open(anno_path, "r") as f:
-            anno = json.load(f)
-            self.part_num = len(anno)
-        target_id = random.randint(0, self.part_num - 1)
-        target_anno = anno[target_id]
-        while target_anno["is_gapart"] == "false":
-            target_id = random.randint(0, self.part_num - 1)
-            target_anno = anno[target_id]
-        self.bbox = target_anno['bbox']
-        if target_anno['category'] == "slider_button":
-            self.action_type = 'press'
-        else:
-            self.action_type = "rot"
-        self.data_dict["action_type"] = self.action_type
-
-        self.scaled_bbox = transform_points_by_pose(
-            self.bbox, pos, rot, scale)
-        self.scaled_bbox = np.array(self.scaled_bbox).reshape(-1, 1, 3)
-        self.data_dict["scaled_bbox"] = self.scaled_bbox
-
-        self.part_id = target_id
-        self.data_dict["part_id"] = self.part_id
-
-
-    def collect_data(self, frame_id, robot, robot_entity_cfg):
-        single_cam_data = convert_dict_to_backend(
-            {k: v[self.camera_id] for k, v in self.camera.data.output.items()}, backend="numpy"
-        )
-
-        # # Extract the other information
-        # single_cam_info = self.camera.data.info[self.camera_id]
-        # group_name = f"frame_{frame_id}"
-
-        # 2. 将数据保存为 dataset
-        for key, data in single_cam_data.items():
-            if data is not None:
-                img = np.array(data)
-                if img.max() > 1.0000002:
-                    img = img.astype(np.int16)
-                else:
-                    img = img.astype(np.float32)  # already 0..1
-                if self.data_dict.get(key) is None:
-                    self.data_dict[key] = []
-                self.data_dict[key].append(data)
-
-                # # 3. 将元数据 (info) 保存为 dataset 的 attributes
-                # info = single_cam_info.get(key)
-                # if info is not None:
-                #     for info_key, info_val in info.items():
-                #         # 确保值是 h5py 支持的类型 (str, int, float, numpy scalar)
-                #         if info_val is None:
-                #             info_val = 'None' # H5 不支持 None
-                #             if isinstance(info_val, (list, tuple)):
-                #                 info_val = np.array(info_val)
-                #             elif isinstance(info_val, (int, float, str, np.number)):
-                #                 info_val = info_val
-                #             else:
-                #                 dset.attrs[info_key] = json.dumps(info_val, ensure_ascii=False)
-
-        pose = robot.data.body_pose_w[:, robot_entity_cfg.body_ids[0]]
-        # embed()
-        self.data_dict["poses"].append(pose.cpu().numpy())
-
-    def cal_cammat(self, pos, tar):
-        # 计算朝向向量
-        forward = tar - pos
-        forward /= np.linalg.norm(forward)
-
-        # 定义上方向
-        up = np.array([0, 0, 1])
-
-        # 计算左方向
-        left = np.cross(up, forward)
-        left /= np.linalg.norm(left)
-
-        # 重新计算正交的上方向
-        up = np.cross(forward, left)
-
-        mat44 = np.eye(4)
-        mat44[:3, :3] = np.stack([forward, left, up], axis=1)
-        mat44[:3, 3] = pos
-        self.cam_mat.append(mat44)
-
-    def _reset(self):
-        self.data_dict = {
-            "poses": [], "scaled_bbox": [], "cam_mat": [], "action_type": "", "camera_id": self.camera_id,}
-        self.get_bbox()
-        self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
-        self.data_dict["target_id"] = self.target_id
+        with h5py.File(h5_path, 'r') as f:
+            print(f"H5 file: {h5_path}")
+            f.visititems(visitor)
+            self.rgbs = f["rgb"][:]
+            self.poses = f["poses"][:]
+            self.scaled_bbox = f["scaled_bbox"][:]
+    
 
     def run_simulator(self, sim: sim_utils.SimulationContext, scene: InteractiveScene):
         """Runs the simulation loop."""
@@ -357,23 +197,15 @@ class PlanningDemo:
         # note: we only do this here for readability.
         robot = scene["robot"]
         # self.camera = scene["camera"]
-
-        # Camera positions, targets, orientations
-        camera_positions = torch.tensor(
-            [[2.5, 2.5, 2.5], [-2.5, -2.5, 2.5]], device=sim.device)
-        camera_targets = torch.tensor(
-            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], device=sim.device)
-
-        # Set pose
-        self.camera.set_world_poses_from_view(camera_positions, camera_targets)
-        for i in range(camera_positions.shape[0]):
-            self.cal_cammat(camera_positions[i].cpu().numpy(),
-                           camera_targets[i].cpu().numpy())
         # Create controller
         diff_ik_cfg = DifferentialIKControllerCfg(
             command_type="pose", use_relative_mode=False, ik_method="dls")
         diff_ik_controller = DifferentialIKController(
             diff_ik_cfg, num_envs=scene.num_envs, device=sim.device)
+        
+        #load_h5
+        h5_path = osp.join(self.data_prefix, f"data_{1:04d}.h5")
+        self.load_h5data(h5_path)
 
         # Markers
         frame_marker_cfg = FRAME_MARKER_CFG.copy()
@@ -385,19 +217,13 @@ class PlanningDemo:
         pt_marker = VisualizationMarkers(
             bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points"))
 
-        # Define goals for the arm
-        ee_goals = [
-            [0.5, 0.5, 0.7, 0.707, 0, 0.707, 0],
-            [0.5, -0.4, 0.6, 0.707, 0.707, 0.0, 0.0],
-            [0.5, 0, 0.5, 0.0, 1.0, 0.0, 0.0],
-        ]
-        ee_goals = torch.tensor(ee_goals, device=sim.device)
+
         # Track the given command
         current_goal_idx = 0
         # Create buffers to store actions
         ik_commands = torch.zeros(
             scene.num_envs, diff_ik_controller.action_dim, device=robot.device)
-        ik_commands[:] = ee_goals[current_goal_idx]
+        ik_commands[:] = torch.from_numpy(self.poses[current_goal_idx])
 
         # Specify robot-specific parameters
         if args_cli.robot == "franka_panda":
@@ -424,11 +250,8 @@ class PlanningDemo:
         count = 0
         # Simulation loop
         turn = 0
-        self._reset()
         while simulation_app.is_running():
             if count % 150 == 0:
-                h5_path = osp.join(self.output_prefix, f"data_{turn:04d}.h5")
-                # reset time
                 count = 0
                 # reset joint state
                 joint_pos = robot.data.default_joint_pos.clone()
@@ -436,12 +259,9 @@ class PlanningDemo:
                 robot.write_joint_state_to_sim(joint_pos, joint_vel)
                 robot.reset()
                 # reset actions
-                # ik_commands[:] = ee_goals[current_goal_idx]
-                bbox_pts = deepcopy(self.scaled_bbox).reshape(-1, 3)
-                center = bbox_pts.mean(0).tolist()
-                center[2] += 0.1
-                ik_commands[0, :3] = torch.tensor(center)
-                ik_commands[0, 3:] = torch.tensor([0, 1, 0, 0])
+            if count % 5 == 0:
+                # _print(count//5)
+                ik_commands = torch.tensor(self.poses[count//5]).to(robot.device)
 
                 joint_pos_des = joint_pos[:,
                                           robot_entity_cfg.joint_ids].clone()
@@ -450,10 +270,6 @@ class PlanningDemo:
                 diff_ik_controller.set_command(ik_commands)
 
                 turn += 1
-                if turn > 1:
-                    print(f"HDF5 writer initialized. Saving data to: {h5_path}")
-                    self.data2h5(h5_path)
-                    self._reset()   
 
             else:
                 # obtain quantities from simulation
@@ -478,7 +294,6 @@ class PlanningDemo:
             scene.write_data_to_sim()
             # perform step
             sim.step()
-            self.camera.update(dt=sim.get_physics_dt())
             # _print(self.camera.data)
             # update sim-time
             count += 1
@@ -492,23 +307,16 @@ class PlanningDemo:
             ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
             goal_marker.visualize(
                 ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
-            # pt_marker.visualize(self.scaled_bbox[0])
-            
+            pt_marker.visualize(self.scaled_bbox[0])
 
-            if count % 5 == 0:
-                if self.save_data:
-                    self.collect_data(count, robot, robot_entity_cfg)
-
-
-@hydra.main(config_path="config", config_name="data")
-def main(cfg: DictConfig):
+def main():
     """Main function."""
     # Load kit helper
     sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
     sim.set_camera_view([2.5, 2.5, 2.5], [0.0, 0.0, 0.0])
-    demo = PlanningDemo(**cfg.PlanningDemo)
+    demo = PlanningDemo()
     # Design scene
     scene_cfg = TableTopSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
     scene = InteractiveScene(scene_cfg)
@@ -518,7 +326,6 @@ def main(cfg: DictConfig):
     print("[INFO]: Setup complete...")
     # Run the simulator
     demo.run_simulator(sim, scene)
-
 
 if __name__ == "__main__":
     main()

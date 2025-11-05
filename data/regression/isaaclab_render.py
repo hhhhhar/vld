@@ -121,6 +121,11 @@ bbox_pts_cfg = VisualizationMarkersCfg(
         ), })
 
 
+def _print(msg: str):
+    print('----------------------------------------------------------------------')
+    print(msg)
+
+
 @configclass
 class TableTopSceneCfg(InteractiveSceneCfg):
     """Configuration for a cart-pole scene."""
@@ -220,7 +225,6 @@ class PlanningDemo:
         self.output_prefix = output_prefix
         self.data_dict = {}
         self.define_sensor()
-        self.part_id = -1
         
     def define_sensor(self):
         """Defines the camera sensor to add to the scene."""
@@ -252,6 +256,7 @@ class PlanningDemo:
         # Create camera
         self.camera = Camera(cfg=camera_cfg)
 
+
     def data2h5(self, h5_path):
         with h5py.File(h5_path, "w") as f:
             for key in self.data_dict.keys():
@@ -281,44 +286,36 @@ class PlanningDemo:
         self.scaled_bbox = np.array(self.scaled_bbox).reshape(-1, 1, 3)
         self.data_dict["scaled_bbox"] = self.scaled_bbox
 
-        self.part_id = target_id
-        self.data_dict["part_id"] = self.part_id
 
+    def collect_data(self, turn, frame_id, robot, robot_entity_cfg):
+        output_dir = osp.join(self.output_prefix, f"data_{turn:04d}", f"frame_{frame_id:05d}")
+        if not osp.exists(output_dir):
+            os.makedirs(output_dir)
+        rep_writer = rep.BasicWriter(
+            output_dir=output_dir,
+            frame_padding=0,
+            colorize_instance_id_segmentation=self.camera.cfg.colorize_instance_id_segmentation,
+            colorize_instance_segmentation=self.camera.cfg.colorize_instance_segmentation,
+            colorize_semantic_segmentation=self.camera.cfg.colorize_semantic_segmentation,
+        )
 
-    def collect_data(self, frame_id, robot, robot_entity_cfg):
         single_cam_data = convert_dict_to_backend(
             {k: v[self.camera_id] for k, v in self.camera.data.output.items()}, backend="numpy"
         )
+        # Extract the other information
+        single_cam_info = self.camera.data.info[self.camera_id]
+        # Pack data back into replicator format to save them using its writer
+        rep_output = {"annotators": {}}
+        for key, data, info in zip(single_cam_data.keys(), single_cam_data.values(), single_cam_info.values()):
+            if info is not None:
+                rep_output["annotators"][key] = {"render_product": {"data": data, **info}}
+            else:
+                rep_output["annotators"][key] = {"render_product": {"data": data}}
+        # Save images
+        # Note: We need to provide On-time data for Replicator to save the images.
+        rep_output["trigger_outputs"] = {"on_time": self.camera.frame[self.camera_id]}
+        rep_writer.write(rep_output)
 
-        # # Extract the other information
-        # single_cam_info = self.camera.data.info[self.camera_id]
-        # group_name = f"frame_{frame_id}"
-
-        # 2. 将数据保存为 dataset
-        for key, data in single_cam_data.items():
-            if data is not None:
-                img = np.array(data)
-                if img.max() > 1.0000002:
-                    img = img.astype(np.int16)
-                else:
-                    img = img.astype(np.float32)  # already 0..1
-                if self.data_dict.get(key) is None:
-                    self.data_dict[key] = []
-                self.data_dict[key].append(data)
-
-                # # 3. 将元数据 (info) 保存为 dataset 的 attributes
-                # info = single_cam_info.get(key)
-                # if info is not None:
-                #     for info_key, info_val in info.items():
-                #         # 确保值是 h5py 支持的类型 (str, int, float, numpy scalar)
-                #         if info_val is None:
-                #             info_val = 'None' # H5 不支持 None
-                #             if isinstance(info_val, (list, tuple)):
-                #                 info_val = np.array(info_val)
-                #             elif isinstance(info_val, (int, float, str, np.number)):
-                #                 info_val = info_val
-                #             else:
-                #                 dset.attrs[info_key] = json.dumps(info_val, ensure_ascii=False)
 
         pose = robot.data.body_pose_w[:, robot_entity_cfg.body_ids[0]]
         # embed()
@@ -349,7 +346,6 @@ class PlanningDemo:
             "poses": [], "scaled_bbox": [], "cam_mat": [], "action_type": "", "camera_id": self.camera_id,}
         self.get_bbox()
         self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
-        self.data_dict["target_id"] = self.target_id
 
     def run_simulator(self, sim: sim_utils.SimulationContext, scene: InteractiveScene):
         """Runs the simulation loop."""
@@ -426,8 +422,9 @@ class PlanningDemo:
         turn = 0
         self._reset()
         while simulation_app.is_running():
+            # reset
             if count % 150 == 0:
-                h5_path = osp.join(self.output_prefix, f"data_{turn:04d}.h5")
+                h5_path = osp.join(self.output_prefix, f"data_{turn:04d}/status.h5")
                 # reset time
                 count = 0
                 # reset joint state
@@ -472,14 +469,16 @@ class PlanningDemo:
                 joint_pos_des = diff_ik_controller.compute(
                     ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
+            if count % 5 == 0:
+                if self.save_data:
+                    self.collect_data(turn, count, robot, robot_entity_cfg)
+
             # apply actions
             robot.set_joint_position_target(
                 joint_pos_des, joint_ids=robot_entity_cfg.joint_ids)
             scene.write_data_to_sim()
             # perform step
             sim.step()
-            self.camera.update(dt=sim.get_physics_dt())
-            # _print(self.camera.data)
             # update sim-time
             count += 1
             # update buffers
@@ -493,11 +492,6 @@ class PlanningDemo:
             goal_marker.visualize(
                 ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
             # pt_marker.visualize(self.scaled_bbox[0])
-            
-
-            if count % 5 == 0:
-                if self.save_data:
-                    self.collect_data(count, robot, robot_entity_cfg)
 
 
 @hydra.main(config_path="config", config_name="data")
