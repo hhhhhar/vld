@@ -1,0 +1,3 @@
+# ninja log v5
+0	14853	1762365398026351132	/home/hhhar/liuliu/vld/model/index_max_ext/build/temp.linux-x86_64-cpython-311/index_max.o	68a699f03ff034be
+1	49370	1762365432513534809	/home/hhhar/liuliu/vld/model/index_max_ext/build/temp.linux-x86_64-cpython-311/index_max_cuda.o	f2e1da8de9177367
