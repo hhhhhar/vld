@@ -17,7 +17,7 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 # --- 多模态前置网络 ---
 
 class MultiModalBackbone(nn.Module):
-    def __init__(self, text_model_name='bert-base-uncased'):
+    def __init__(self, text_model_name='bert-base-uncased', load_pretrained_resnet=True, pc_num = 1024):
         """
         初始化三个模态的特征提取器。
         
@@ -30,10 +30,11 @@ class MultiModalBackbone(nn.Module):
         # 1. ResNet-50 用于 RGB 特征提取
         # 加载预训练的 ResNet-50
         # resnet50 = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
-        weight_path = "/home/hhhar/liuliu/vld/model/weight/resnet50-11ad3fa6.pth"
+        res_weight_path = "/home/hhhar/liuliu/vld/model/weight/resnet50-11ad3fa6.pth"
         resnet50 = models.resnet50(pretrained=False)
-        checkpoint = torch.load(weight_path, map_location=torch.device('cpu'))
-        resnet50.load_state_dict(checkpoint)
+        if load_pretrained_resnet:
+            checkpoint = torch.load(res_weight_path, map_location=torch.device('cpu'))
+            resnet50.load_state_dict(checkpoint)
         # 移除最后的 avgpool 和 fc 分类层
         # 我们保留到第8层（即最后一个卷积块的输出）
         self.rgb_extractor = nn.Sequential(*list(resnet50.children())[:-2])
@@ -42,18 +43,18 @@ class MultiModalBackbone(nn.Module):
         self.rgb_flatten = nn.Flatten()
         # ResNet-50 的输出特征维度为 2048
 
-        # 2. PointNet++ 用于点云特征提取 (使用占位符)
-        print("注意：正在使用 PointNet++ 的占位符实现。")
+        # 2. PointNet++ 用于点云特征提取 
         self.pc_extractor = PointNetPlus()
 
         # 3. BERT 用于文本特征提取
         self.bert_model = BertModel.from_pretrained(text_model_name)
         # BERT (base) 模型的输出特征维度为 768
+        self.pc_num = pc_num
         
         print(f"多模态前置网络初始化完成：")
         print(f"  - RGB (ResNet-50) -> 2048 维特征")
-        print(f"  - 点云 (PointNet++ 占位符)")
-        print(f"  - 文本 (BERT) -> {self.bert_model.config.hidden_size} 维特征")
+        print(f"  - 点云 (PointNet++ ) -> 1024 维特征")
+        print(f"  - 文本 ({text_model_name}) -> {self.bert_model.config.hidden_size} 维特征")
 
 
     def forward(self, image, point_cloud, text_input):
@@ -68,7 +69,8 @@ class MultiModalBackbone(nn.Module):
                                 'attention_mask': (B, SeqLen)
                                 'token_type_ids': (B, SeqLen) [可选]
         """
-
+        _pc_num = point_cloud.shape[1]
+        assert _pc_num == self.pc_num, f"点云输入的点数应为1024, 但收到 {_pc_num} 点"
         # --- 1. 处理 RGB 图像 ---
         x_rgb = self.rgb_extractor(image)
         x_rgb = self.rgb_pool(x_rgb)

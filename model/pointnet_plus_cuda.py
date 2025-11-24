@@ -63,7 +63,8 @@ class PointNetPlus(nn.Module):
             nn.Conv1d(128, 128, kernel_size=1, bias=False),
             nn.BatchNorm1d(128),
             nn.ReLU(True),
-            nn.Dropout(0.5)
+            nn.Dropout(0.5),
+            nn.Conv1d(128, 1, kernel_size=1)
         )
 
     def forward(self, xyz, features):
@@ -90,7 +91,8 @@ class PointNetPlus(nn.Module):
                 l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
             )
 
-        return self.fc_layer(l_features[0])
+        x = self.fc_layer(l_features[0])
+        return x.squeeze(1)
 
 
 if __name__ == '__main__':

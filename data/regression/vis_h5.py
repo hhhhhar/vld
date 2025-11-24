@@ -1,4 +1,6 @@
 import h5py
+import matplotlib
+matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -18,8 +20,8 @@ def print_h5_tree(h5_path):
     with h5py.File(h5_path, 'r') as f:
         print(f"H5 file: {h5_path}")
         f.visititems(visitor)
+        plt.figure(figsize=(10, 6))
         for img in f["rgb"]:
-            plt.figure(figsize=(10, 6))
             plt.imshow(img)
             plt.show()
 
