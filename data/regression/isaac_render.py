@@ -464,6 +464,8 @@ class PlanningDemo:
         self._reset()
         while simulation_app.is_running():
             if count % 150 == 0:
+                # TODO: bbox seems not correct
+                
                 h5_path = osp.join(self.output_prefix, f"data_{turn:04d}.h5")
                 # reset time
                 count = 0
