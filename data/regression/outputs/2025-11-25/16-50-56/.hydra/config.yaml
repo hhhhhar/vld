@@ -1,0 +1,5 @@
+PlanningDemo:
+  target_id: 100392
+  camera_id: 0
+  save_data: true
+  output_prefix: /home/hhhar/liuliu/vld/data/regression/data_res

@@ -56,7 +56,7 @@ from isaaclab.sensors import Camera, CameraCfg
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG, UR10_CFG  # isort:skip
 from isaaclab.assets import ArticulationCfg
-from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.math import subtract_frame_transforms, matrix_from_quat
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils import configclass
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -91,6 +91,7 @@ MY_NEW_OBJECT_CFG = ArticulationCfg(
             disable_gravity=False
         ),
         scale=[TARGET_SCALE for _ in range(3)],
+        semantic_tags=[("class", "target")],
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=TARGET_INIT_POS,
@@ -154,7 +155,7 @@ class TableTopSceneCfg(InteractiveSceneCfg):
     else:
         raise ValueError(
             f"Robot {args_cli.robot} is not supported. Valid: franka_panda, ur10")
-
+    robot.spawn.semantic_tags = [("class", "robot")]
     my_new_articulation = MY_NEW_OBJECT_CFG.replace(
         prim_path="{ENV_REGEX_NS}/MyNewObject"  # 给它一个唯一的场景路径
     )
@@ -237,10 +238,8 @@ class PlanningDemo:
             data_types=[
                 "rgb",
                 "distance_to_image_plane",
-                "normals",
                 "semantic_segmentation",
                 "instance_segmentation_fast",
-                "instance_id_segmentation_fast",
             ],
             colorize_semantic_segmentation=True,
             colorize_instance_id_segmentation=True,
@@ -264,9 +263,10 @@ class PlanningDemo:
         with open(anno_path, "r") as f:
             anno = json.load(f)
             self.part_num = len(anno)
-        target_id = random.randint(0, self.part_num - 1)
+        # target_id = random.randint(0, self.part_num - 1)
+        target_id = 42
         target_anno = anno[target_id]
-        while target_anno["is_gapart"] == "false":
+        while target_anno["is_gapart"] == False:
             target_id = random.randint(0, self.part_num - 1)
             target_anno = anno[target_id]
         self.bbox = target_anno['bbox']
@@ -325,31 +325,70 @@ class PlanningDemo:
         self.data_dict["poses"].append(pose.cpu().numpy())
 
     def cal_cammat(self, pos, tar):
-        # 计算朝向向量
-        forward = tar - pos
-        forward /= np.linalg.norm(forward)
+        """
+        计算 Isaac Sim (USD) 标准的相机位姿矩阵。
+        约定：-Z 为前方, +Y 为上方, +X 为右方
+        """
+        # 1. 计算 Z 轴 (Camera Z)
+        # 因为 Isaac 相机看的是 -Z 方向，所以 +Z 应该指向“相机后方” (从目标指向相机)
+        z_axis = pos - tar
+        z_axis /= np.linalg.norm(z_axis)
 
-        # 定义上方向
-        up = np.array([0, 0, 1])
+        # 2. 定义世界 上方向 (World Up)
+        world_up = np.array([0, 0, 1])
 
-        # 计算左方向
-        left = np.cross(up, forward)
-        left /= np.linalg.norm(left)
+        # 3. 计算 X 轴 (Camera Right)
+        # 右 = WorldUp x Z_axis
+        x_axis = np.cross(world_up, z_axis)
+        # 极点保护：如果相机垂直向下看，x_axis 模长会接近0，需要特殊处理
+        if np.linalg.norm(x_axis) < 1e-6:
+            x_axis = np.array([1, 0, 0]) # 默认值
+        else:
+            x_axis /= np.linalg.norm(x_axis)
 
-        # 重新计算正交的上方向
-        up = np.cross(forward, left)
-
+        # 4. 计算 Y 轴 (Camera Up)
+        # 上 = Z_axis x X_axis (严格正交)
+        y_axis = np.cross(z_axis, x_axis)
+        
+        # 5. 组装矩阵
+        # 旋转矩阵的列向量分别是 X, Y, Z 轴
         mat44 = np.eye(4)
-        mat44[:3, :3] = np.stack([forward, left, up], axis=1)
+        mat44[:3, 0] = x_axis
+        mat44[:3, 1] = y_axis
+        mat44[:3, 2] = z_axis
         mat44[:3, 3] = pos
         self.cam_mat.append(mat44)
+    
+    # def cal_cammat(self):
+    #     pos = self.camera.data.pos_w[self.camera_id]      # Shape: (3,) -> [x, y, z]
+    #     quat = self.camera.data.quat_w_world[self.camera_id]  # Shape: (4,) -> [w, x, y, z]
+    #     # 2. 将四元数转换为 3x3 旋转矩阵
+    #     # Isaac Lab 提供了基于 torch 的转换工具
+    #     embed()
+    #     _print(pos)
+    #     _print(quat)
+    #     rot_matrix = matrix_from_quat(quat) # Shape: (3, 3)
+    #     _print(rot_matrix)
+    #     # 3. 组装 4x4 矩阵
+    #     # 创建一个 4x4 的单位阵
+    #     pose_matrix = torch.eye(4, device=self.camera.device)
+
+    #     # 填入旋转部分 [0:3, 0:3]
+    #     pose_matrix[:3, :3] = rot_matrix
+
+    #     # 填入平移部分 [0:3, 3]
+    #     pose_matrix[:3, 3] = pos
+    #     pose_matrix = pose_matrix.cpu().numpy()
+    #     self.cam_mat.append(pose_matrix)
+    #     self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
+
 
     def _reset(self):
         self.data_dict = {
             "poses": [], "scaled_bbox": [], "cam_mat": [], "action_type": "", "camera_id": self.camera_id,}
         self.get_bbox()
-        self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
         self.data_dict["target_id"] = self.target_id
+        self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
 
     def run_simulator(self, sim: sim_utils.SimulationContext, scene: InteractiveScene):
         """Runs the simulation loop."""
@@ -360,9 +399,9 @@ class PlanningDemo:
 
         # Camera positions, targets, orientations
         camera_positions = torch.tensor(
-            [[2.5, 2.5, 2.5], [-2.5, -2.5, 2.5]], device=sim.device)
+            [[0.9, 0.4, 1.0], [-0.9, -0.4, 1.0]], device=sim.device)
         camera_targets = torch.tensor(
-            [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], device=sim.device)
+            [TARGET_INIT_POS, TARGET_INIT_POS], device=sim.device)
 
         # Set pose
         self.camera.set_world_poses_from_view(camera_positions, camera_targets)
@@ -392,12 +431,10 @@ class PlanningDemo:
             [0.5, 0, 0.5, 0.0, 1.0, 0.0, 0.0],
         ]
         ee_goals = torch.tensor(ee_goals, device=sim.device)
-        # Track the given command
-        current_goal_idx = 0
         # Create buffers to store actions
         ik_commands = torch.zeros(
             scene.num_envs, diff_ik_controller.action_dim, device=robot.device)
-        ik_commands[:] = ee_goals[current_goal_idx]
+        ik_commands[:] = ee_goals[self.part_id]
 
         # Specify robot-specific parameters
         if args_cli.robot == "franka_panda":
@@ -448,12 +485,14 @@ class PlanningDemo:
                 # reset controller
                 diff_ik_controller.reset()
                 diff_ik_controller.set_command(ik_commands)
+                pt_marker.visualize(self.scaled_bbox[0])
 
                 turn += 1
-                if turn > 1:
-                    print(f"HDF5 writer initialized. Saving data to: {h5_path}")
-                    self.data2h5(h5_path)
-                    self._reset()   
+                if turn > 1 :
+                    if self.save_data:
+                        print(f"HDF5 writer initialized. Saving data to: {h5_path}")
+                        self.data2h5(h5_path)
+                self._reset()   
 
             else:
                 # obtain quantities from simulation
@@ -479,21 +518,25 @@ class PlanningDemo:
             # perform step
             sim.step()
             self.camera.update(dt=sim.get_physics_dt())
+
+            if turn == 0 and count == 0:
+                intrinsics = self.camera.data.intrinsic_matrices
+                self.data_dict["intrinsics"] = intrinsics[self.camera_id].cpu().numpy()
+
             # _print(self.camera.data)
             # update sim-time
             count += 1
             # update buffers
             scene.update(sim_dt)
+            self.camera.update(0.0)
 
             # obtain quantities from simulation
             ee_pose_w = robot.data.body_state_w[:,
                                                 robot_entity_cfg.body_ids[0], 0:7]
-            # update marker positions
-            ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
-            goal_marker.visualize(
-                ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
-            # pt_marker.visualize(self.scaled_bbox[0])
-            
+            # # update marker positions
+            # ee_marker.visualize(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7])
+            # goal_marker.visualize(
+            #     ik_commands[:, 0:3] + scene.env_origins, ik_commands[:, 3:7])
 
             if count % 5 == 0:
                 if self.save_data:
@@ -507,7 +550,7 @@ def main(cfg: DictConfig):
     sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view([2.5, 2.5, 2.5], [0.0, 0.0, 0.0])
+    sim.set_camera_view([0.9, 0.4, 1.0], TARGET_INIT_POS)
     demo = PlanningDemo(**cfg.PlanningDemo)
     # Design scene
     scene_cfg = TableTopSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)

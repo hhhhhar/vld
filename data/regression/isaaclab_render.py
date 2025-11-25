@@ -447,7 +447,7 @@ class PlanningDemo:
                 diff_ik_controller.set_command(ik_commands)
 
                 turn += 1
-                if turn > 1:
+                if turn > 1 and self.save_data:
                     print(f"HDF5 writer initialized. Saving data to: {h5_path}")
                     self.data2h5(h5_path)
                     self._reset()   
@@ -479,6 +479,7 @@ class PlanningDemo:
             scene.write_data_to_sim()
             # perform step
             sim.step()
+
             # update sim-time
             count += 1
             # update buffers
@@ -501,7 +502,7 @@ def main(cfg: DictConfig):
     sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view([2.5, 2.5, 2.5], [0.0, 0.0, 0.0])
+    sim.set_camera_view([1.5, 0.0, 1.5], [0.0, 0.0, 0.0])
     demo = PlanningDemo(**cfg.PlanningDemo)
     # Design scene
     scene_cfg = TableTopSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
