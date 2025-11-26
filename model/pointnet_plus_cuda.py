@@ -6,7 +6,7 @@ import sys
 sys.path.append("..")  ## 这个
 import os
 os.chdir(sys.path[0])
-from Pointnet2_PyTorch_master.pointnet2_ops_lib.pointnet2_ops.pointnet2_modules import PointnetFPModule, PointnetSAModule
+from model.Pointnet2_PyTorch_master.pointnet2_ops_lib.pointnet2_ops.pointnet2_modules import PointnetFPModule, PointnetSAModule
 
 from IPython import embed
 

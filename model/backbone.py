@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
 from transformers import BertModel, BertTokenizer
-from pointnet_plus_cuda import PointNetPlus
+from model.pointnet_plus_cuda import PointNetPlus
 import os
 os.environ['CURL_CA_BUNDLE'] = ''
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
