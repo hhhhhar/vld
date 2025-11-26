@@ -421,8 +421,10 @@ class PlanningDemo:
             frame_marker_cfg.replace(prim_path="/Visuals/ee_current"))
         goal_marker = VisualizationMarkers(
             frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
-        pt_marker = VisualizationMarkers(
-            bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points"))
+        pt_marker_1 = VisualizationMarkers(
+            bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points_1"))
+        pt_marker_2 = VisualizationMarkers(
+            bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points_2"))
 
         # Define goals for the arm
         ee_goals = [
@@ -460,14 +462,20 @@ class PlanningDemo:
         sim_dt = sim.get_physics_dt()
         count = 0
         # Simulation loop
-        turn = 0
+        turn = -1
         self._reset()
         while simulation_app.is_running():
             if count % 150 == 0:
                 # TODO: bbox seems not correct
-                
+                turn += 1
                 h5_path = osp.join(self.output_prefix, f"data_{turn:04d}.h5")
                 # reset time
+                if turn > 0 :
+                    if self.save_data:
+                        print(f"HDF5 writer initialized. Saving data to: {h5_path}")
+                        self.data2h5(h5_path)
+                self._reset()  
+
                 count = 0
                 # reset joint state
                 joint_pos = robot.data.default_joint_pos.clone()
@@ -487,14 +495,10 @@ class PlanningDemo:
                 # reset controller
                 diff_ik_controller.reset()
                 diff_ik_controller.set_command(ik_commands)
-                pt_marker.visualize(self.scaled_bbox[0])
+                pt_marker_1.visualize(self.scaled_bbox[0])
+                pt_marker_2.visualize(self.scaled_bbox[-1])
 
-                turn += 1
-                if turn > 1 :
-                    if self.save_data:
-                        print(f"HDF5 writer initialized. Saving data to: {h5_path}")
-                        self.data2h5(h5_path)
-                self._reset()   
+                 
 
             else:
                 # obtain quantities from simulation
