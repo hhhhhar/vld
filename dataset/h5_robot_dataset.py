@@ -152,9 +152,9 @@ class H5RobotDataset(Dataset):
             [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]])
 
         return {
-            "center": center,
-            "extent": extent,
-            "quat": quat_isaac,
+            "center": center.tolist(),
+            "extent": extent.tolist(),
+            "quat": quat_isaac.tolist(),
             "matrix": rotation_matrix
         }
 
@@ -260,26 +260,7 @@ class H5RobotDataset(Dataset):
                 import open3d as o3d
                 print("\n🎨 正在启动 Open3D 可视化窗口...")
                 print("   (按 'Q' 键退出窗口)")
-
-                lines = [
-                    [0, 1], [1, 2], [2, 3], [3, 0], # 底面
-                    [4, 5], [5, 6], [6, 7], [7, 4], # 顶面
-                    [0, 4], [1, 5], [2, 6], [3, 7]  # 侧柱
-                ]
                 
-                # # 2. 创建 LineSet 对象
-                # line_set = o3d.geometry.LineSet()
-                
-                # # 设置点 (Points)
-                # line_set.points = o3d.utility.Vector3dVector(self.bbox)
-                
-                # # 设置线 (Lines)
-                # line_set.lines = o3d.utility.Vector2iVector(lines)
-                
-                # # 设置颜色 (Colors)
-                # # 给每一条线都染上同样的颜色
-                # colors = [[1, 0, 0] for _ in range(len(lines))]
-                # line_set.colors = o3d.utility.Vector3dVector(colors)
                 obb = o3d.geometry.OrientedBoundingBox()
                 obb.center = self.bbox["center"]
                 obb.extent = self.bbox["extent"]
@@ -388,7 +369,7 @@ class H5RobotDataset(Dataset):
         # 4. 文本 (构造 BERT 需要的输入，这里只是返回 raw text，需要在 collate_fn 里 tokenize)
         bbox_info = deepcopy(self.bbox)
         del bbox_info["matrix"]  # 删除矩阵，保留中心、尺寸、四元数
-        text = f"action: {self.action_type}, target_area: {self.bbox}"
+        text = f"action: {self.action_type}, target_area: {bbox_info}"
 
         return {
             "image": image_tensor,

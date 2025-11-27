@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import datetime
 import os
 import time
 from IPython import embed
@@ -94,8 +94,9 @@ def main(cfg: DictConfig):
     # 5. 训练循环
     # ------------------------------------------------------------------
     log.info("Start Training...")
-    cp_dir = f"cps/{date.today}"
-    
+    cp_dir = f"cps/{datetime.now().strftime('%Y_%m_%d_%H:%M')}"
+    if not osp.exists(cp_dir):
+        os.makedirs(cp_dir)
     for epoch in range(start_epoch, cfg.training.epochs):
         model.train()
         epoch_loss = 0.0

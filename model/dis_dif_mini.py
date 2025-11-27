@@ -133,38 +133,73 @@ class DiscreteDiffusionPolicy(nn.Module):
         # --- A. 处理 State (只算一次) ---
         state_embeds = self._process_state(state_features) # (B, 1, H)
         
-        # 初始化 Mask
+        # 初始化：全都是 [MASK]
         current_ids = torch.full((B, L), self.mask_token_id, device=device, dtype=torch.long)
         
         for step in range(steps):
-            progress = (step + 1) / steps
+            # 计算当前进度 (0.0 -> 1.0)
+            # step=0 -> t=0.1 ... step=9 -> t=1.0
+            t = (step + 1) / steps
+            
+            # 根据进度计算剩余需要 Mask 的比例 (MaskGIT Cosine Schedule)
+            # t=0 时 ratio=1.0 (全Mask), t=1 时 ratio=0.0 (全保留)
+            mask_ratio = self.get_mask_ratio_schedule(t)
+            
+            # 计算本轮结束后，需要保留多少个 [MASK]
+            n_mask = int(L * mask_ratio)
             
             # --- Forward ---
+            # 1. 正常的 Embedding 和 Transformer 前向传播
             action_embeds = self.action_embed(current_ids) + self.action_pos_embed[:, :L, :]
             x = torch.cat([state_embeds, action_embeds], dim=1)
-            
             x = self.transformer(x)
-            action_out = x[:, state_embeds.shape[1]:, :]
+            
+            # 2. 拿到预测结果
+            action_out = x[:, state_embeds.shape[1]:, :] # 剥离 state
             action_out = self.final_norm(action_out)
-            logits = self.predict_head(action_out)
+            logits = self.predict_head(action_out) # (B, L, vocab)
             
-            # --- Sampling Strategy ---
+            # --- Sampling Strategy (核心修改) ---
+            
+            # 3. 获取当前所有位置的预测 Token 和 置信度
             probs = F.softmax(logits, dim=-1)
-            confidence, pred_ids = probs.max(dim=-1)
+            sampled_conf, sampled_ids = probs.max(dim=-1) # (B, L)
             
-            # Re-masking
-            ratio = self.get_mask_ratio_schedule(progress)
-            num_to_keep_masked = int(L * ratio)
+            # 4. 【关键步骤1：填充】
+            # 找出当前仍然是 [MASK] 的位置
+            unknown_mask = (current_ids == self.mask_token_id)
             
-            if num_to_keep_masked == 0:
-                current_ids = pred_ids
+            # 仅在 unknown 的位置填入新的预测值 (sampled_ids)
+            # 已知的位置保持原样 (current_ids)，不要覆写！
+            new_ids = torch.where(unknown_mask, sampled_ids, current_ids)
+            
+            # 5. 如果已经到了最后一步 (n_mask == 0)，直接返回填满的结果
+            if n_mask == 0:
+                current_ids = new_ids
                 break
             
-            noisy_conf = confidence + torch.rand_like(confidence) * 1e-4
-            _, mask_indices = torch.topk(noisy_conf, k=num_to_keep_masked, dim=1, largest=False)
+            # 6. 【关键步骤2：重新 Mask】
+            # 我们需要选出置信度最低的 n_mask 个位置变回 [MASK]
+            # 但是！必须保护那些在上一轮就已经确定的 Token，防止它们被误删
             
-            current_ids = pred_ids.clone()
-            row_idx = torch.arange(B, device=device).unsqueeze(1).expand(-1, num_to_keep_masked)
+            # 初始置信度使用当前预测的概率
+            confidence_scores = sampled_conf.clone()
+            
+            # 对于那些本来就"已知"(非 unknown) 的 Token，将其置信度设为无穷大
+            # 这样在排序找"最小值"时，它们永远排在最后，不会被选中
+            confidence_scores[~unknown_mask] = 1e9 
+            
+            # 加一点微小的噪音防止 argsort 在置信度相同时的确定性问题（可选）
+            confidence_scores += torch.rand_like(confidence_scores) * 1e-4
+            
+            # 选出置信度最低的 n_mask 个位置的索引
+            # topk(largest=False) 返回最小的 k 个值
+            _, mask_indices = torch.topk(confidence_scores, k=n_mask, dim=1, largest=False)
+            
+            # 7. 应用 Mask
+            # 这一步只会在那些"刚刚填入但置信度不高"的位置打上 Mask
+            current_ids = new_ids.clone()
+            row_idx = torch.arange(B, device=device).unsqueeze(1).expand(-1, n_mask)
             current_ids[row_idx, mask_indices] = self.mask_token_id
             
         return current_ids.view(B, self.chunk_size, self.n_joints)

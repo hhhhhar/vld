@@ -107,11 +107,6 @@ MY_NEW_OBJECT_CFG = ArticulationCfg(
     })
 
 
-def _print(msg):
-    print('----------------------------------------------------------------------')
-    print(f"msg:{msg}")
-
-
 bbox_pts_cfg = VisualizationMarkersCfg(
     prim_path="/World/Visuals/testMarkers",
     markers={
@@ -269,7 +264,7 @@ class PlanningDemo:
         while target_anno["is_gapart"] == False:
             target_id = random.randint(0, self.part_num - 1)
             target_anno = anno[target_id]
-        self.bbox = target_anno['bbox']
+        bbox = target_anno['bbox']
         if target_anno['category'] == "slider_button":
             self.action_type = 'press'
         else:
@@ -277,7 +272,7 @@ class PlanningDemo:
         self.data_dict["action_type"] = self.action_type
 
         self.scaled_bbox = transform_points_by_pose(
-            self.bbox, pos, rot, scale)
+            bbox, pos, rot, scale)
         self.scaled_bbox = np.array(self.scaled_bbox).reshape(-1, 1, 3)
         self.data_dict["scaled_bbox"] = self.scaled_bbox
 
