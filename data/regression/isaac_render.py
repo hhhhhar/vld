@@ -83,10 +83,12 @@ TARGET_SCALE = 0.2
 TARGET_INIT_POS = (0.5, 0.0, 0.2)
 TARGET_INIT_ROT = (0.7, 0.0, 0.7, 0.0)
 
+item_id = 100392
+
 MY_NEW_OBJECT_CFG = ArticulationCfg(
     # 1. 指向你转换后的 USD 文件
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/hhhar/liuliu/vld/assets/articulation/100392/mobility_annotation_gapartnet/mobility_annotation_gapartnet.usd",  # <-- 替换成你的文件路径
+        usd_path=f"/home/hhhar/liuliu/vld/assets/articulation/{item_id}/mobility_annotation_gapartnet/mobility_annotation_gapartnet.usd",  # <-- 替换成你的文件路径
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False
         ),
@@ -204,19 +206,25 @@ class PlanningDemo:
         self.save_data = save_data
         self.camera_id = camera_id
         self.camera = []
-        self.bbox = []
+        self.scaled_bboxs = []
         self.scaled_bbox = []
         self.poses = []
         self.actions = []
         self.rgbs = []
         self.depthes = []
         self.cam_mat = []
-        self.action_type = []
+        self.action_types = []
         self.part_num = -1
         self.output_prefix = output_prefix
         self.data_dict = {}
         self.define_sensor()
         self.part_id = -1
+        self.over = False
+
+        if osp.exists(self.output_prefix) is False and self.save_data:
+            os.makedirs(self.output_prefix)
+
+        self.get_bboxs()
         
     def define_sensor(self):
         """Defines the camera sensor to add to the scene."""
@@ -253,32 +261,37 @@ class PlanningDemo:
             f.flush()
         print('this turn save ok')
 
-    def get_bbox(self, pos=TARGET_INIT_POS, rot=TARGET_INIT_ROT, scale=TARGET_SCALE):
+    def get_bboxs(self, pos=TARGET_INIT_POS, rot=TARGET_INIT_ROT, scale=TARGET_SCALE):
         anno_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.target_id}/link_annotation_gapartnet.json"
         with open(anno_path, "r") as f:
-            anno = json.load(f)
-            self.part_num = len(anno)
-        # target_id = random.randint(0, self.part_num - 1)
-        target_id = 42
-        target_anno = anno[target_id]
-        while target_anno["is_gapart"] == False:
-            target_id = random.randint(0, self.part_num - 1)
-            target_anno = anno[target_id]
-        bbox = target_anno['bbox']
-        if target_anno['category'] == "slider_button":
-            self.action_type = 'press'
-        else:
-            self.action_type = "rot"
-        self.data_dict["action_type"] = self.action_type
+            annos = json.load(f)
+            self.part_num = len(annos)
 
-        self.scaled_bbox = transform_points_by_pose(
-            bbox, pos, rot, scale)
-        self.scaled_bbox = np.array(self.scaled_bbox).reshape(-1, 1, 3)
+        for anno in annos:
+            if anno["is_gapart"] == False:
+                continue
+            bbox = anno['bbox']
+            self.scaled_bboxs.append(transform_points_by_pose(bbox, pos, rot, scale))
+            if anno['category'] == "slider_button":
+                self.action_types.append('press')
+            else:
+                self.action_types.append("rot")
+
+    def choose_part(self, turn):
+        print(f"Choosing part for turn {turn}...")
+        if turn == -1:
+            turn = 0
+        target_id = turn // 20
+        if target_id >= len(self.scaled_bboxs):
+            self.over = True
+
+        self.scaled_bbox = np.array(self.scaled_bboxs[target_id]).reshape(-1, 1, 3)
         self.data_dict["scaled_bbox"] = self.scaled_bbox
 
         self.part_id = target_id
         self.data_dict["part_id"] = self.part_id
 
+        self.data_dict["action_type"] = self.action_types[target_id]
 
     def collect_data(self, frame_id, robot, robot_entity_cfg):
         single_cam_data = convert_dict_to_backend(
@@ -378,13 +391,128 @@ class PlanningDemo:
     #     self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
 
 
-    def _reset(self):
+    def _reset(self, turn):
         self.data_dict = {
             "poses": [], "scaled_bbox": [], "cam_mat": [], "action_type": "", "camera_id": self.camera_id,}
-        self.get_bbox()
+        self.choose_part(turn)
         self.data_dict["target_id"] = self.target_id
         self.data_dict["cam_mat"]= self.cam_mat[self.camera_id]
 
+    def initialize_robot_with_ik(self, sim, robot, robot_entity_cfg, ik_controller, target_pos_w, target_quat_w, scene, max_iters=20):
+        """
+        使用 IK 求解器在这一帧"瞬间"算出目标位置的关节角，并将其设为机器人的默认初始姿态。
+        
+        原理：在内部运行一个小的收敛循环，利用 IK 迭代逼近目标，避免直接 Set 导致的瞬移误差或抽搐。
+
+        Args:
+            robot: Articulation 对象
+            robot_entity_cfg: 包含 joint_ids, body_ids 的配置对象
+            ik_controller: DifferentialIKController 实例
+            target_pos_w: 世界坐标系下的目标位置 (num_envs, 3)
+            target_quat_w: 世界坐标系下的目标姿态 (num_envs, 4)
+            scene: InteractiveScene 对象 (用于在循环内刷新数据)
+            max_iters: 内部收敛循环的次数，通常 20 次足够收敛
+            
+        Returns:
+            final_joint_pos: 收敛后的关节角度 (num_envs, num_joints)
+        """
+        
+        print(f"[IK Init] Starting IK convergence loop ({max_iters} iters)...")
+        
+        # 1. 准备数据
+        # 获取机械臂末端的 body index (通常配置里只有一个 body_id 对应 ee)
+        ee_body_idx = robot_entity_cfg.body_ids[0]
+        # 获取受控关节的 indices
+        arm_joint_indices = robot_entity_cfg.joint_ids
+        
+        # 临时保存物理步长，循环里用
+        sim_dt = scene.physics_dt
+        
+        # 2. 坐标系预处理：将目标从 World Frame 转为 Base Frame (假设 Controller 需要 Base Frame)
+        # 这是一个初始转换，但由于 Robot Base 可能在移动（虽然初始化时一般不动），
+        # 我们最好在循环里动态计算，但为了性能，初始化时算一次通常也可以。
+        # 这里我们在循环外先准备好目标的 Tensor
+        
+        # --- A. 获取当前物理状态 ---
+        # 必须读 robot.data，它是缓存的数据
+        root_pose_w = robot.data.root_pose_w
+        ee_pose_w = robot.data.body_pose_w[:, ee_body_idx]
+        jacobian = robot.root_physx_view.get_jacobians(
+            )[:, ee_body_idx, :, arm_joint_indices]
+        current_arm_joint_pos = robot.data.joint_pos[:, arm_joint_indices]
+        
+        # 计算目标在基座坐标系下的位置 (每一帧都算一下，防止基座有微小滑动)
+        target_pos_b, target_quat_b = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], 
+            target_pos_w.unsqueeze(0).float(), target_quat_w.unsqueeze(0).float()
+        )
+
+        # --- C. 计算 IK ---
+        # 拼接目标指令
+        ik_commands = torch.cat([target_pos_b, target_quat_b], dim=-1)
+        ik_controller.reset()
+        ik_controller.set_command(ik_commands)
+
+        for i in range(max_iters):
+        
+            # 计算当前末端在基座坐标系下的位置
+            jacobian = robot.root_physx_view.get_jacobians(
+                )[:, ee_body_idx, :, arm_joint_indices]
+            current_arm_joint_pos = robot.data.joint_pos[:, arm_joint_indices]
+            ee_pose_w = robot.data.body_pose_w[:, ee_body_idx]
+            ee_pos_b, ee_quat_b = subtract_frame_transforms(
+                root_pose_w[:, 0:3], root_pose_w[:, 3:7], 
+                ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            )
+            
+            # 计算下一步的关节位置
+            desired_arm_pos = ik_controller.compute(
+                ee_pos_b, ee_quat_b, jacobian, current_arm_joint_pos
+            )
+
+            # --- D. 拼接完整关节状态 (Arm + Gripper) ---
+            # 我们不能只改 Arm，必须保留 Gripper 状态，或者设为默认
+            # 最好是拿当前的 default_joint_pos 作为底板
+            full_joint_pos = robot.data.default_joint_pos.clone()
+            
+            # 覆盖手臂部分的关节角度
+            # 注意：这里假设 robot_entity_cfg.joint_ids 对应的就是 arm 的索引
+            full_joint_pos[:, arm_joint_indices] = desired_arm_pos
+
+            # --- E. 强制瞬移 (Teleport) ---
+            # 将速度设为 0，防止物理引擎计算出巨大的惯性# apply actions
+            robot.set_joint_position_target(
+                desired_arm_pos, joint_ids=robot_entity_cfg.joint_ids)
+            # scene.write_data_to_sim()
+            # sim.step()
+            # robot.write_joint_state_to_sim(full_joint_pos, torch.zeros_like(full_joint_pos))
+            scene.write_data_to_sim()
+            sim.step(render=False)
+            
+            # --- F. 步进物理 (Step Physics) ---
+            # 这一步至关重要！它让 PhysX 更新 Jacobian 和刚体位置
+            # render=False 保证速度极快
+            scene.update(sim_dt)
+
+        # 3. 循环结束，收尾工作
+        print("[IK Init] Convergence finished.")
+        
+        # 获取最终算出来的这个比较完美的关节角度
+        final_joint_pos = robot.data.joint_pos.clone()
+        
+        # 关键：更新默认位置。这样下次你调用 robot.reset() 时，它就会回到这里，而不是回到配置文件里的默认姿态
+        robot.data.default_joint_pos = final_joint_pos
+        robot.data.default_joint_vel = torch.zeros_like(final_joint_pos)
+
+        # 关键：重置控制器内部状态 (积分项等)，防止之前的累积误差影响接下来的正式控制
+        ik_controller.reset()
+        
+        # 最后做一次正式的 Reset，确保一切同步
+        robot.reset()
+        scene.update(dt=0.0) # 刷新 Buffer
+        
+        return final_joint_pos
+    
     def run_simulator(self, sim: sim_utils.SimulationContext, scene: InteractiveScene):
         """Runs the simulation loop."""
         # Extract scene entities
@@ -458,10 +586,9 @@ class PlanningDemo:
         count = 0
         # Simulation loop
         turn = -1
-        self._reset()
-        while simulation_app.is_running():
-            if count % 150 == 0:
-                # TODO: bbox seems not correct
+        self._reset(turn)
+        while simulation_app.is_running() and self.over==False:
+            if count % 100 == 0:
                 turn += 1
                 h5_path = osp.join(self.output_prefix, f"data_{turn:04d}.h5")
                 # reset time
@@ -469,14 +596,31 @@ class PlanningDemo:
                     if self.save_data:
                         print(f"HDF5 writer initialized. Saving data to: {h5_path}")
                         self.data2h5(h5_path)
-                self._reset()  
+                self._reset(turn)  
 
                 count = 0
                 # reset joint state
+                init_pos_id = np.random.randint(0, self.part_num)
+                center = -1
                 joint_pos = robot.data.default_joint_pos.clone()
                 joint_vel = robot.data.default_joint_vel.clone()
                 robot.write_joint_state_to_sim(joint_pos, joint_vel)
-                robot.reset()
+
+                if init_pos_id < len(self.scaled_bboxs):
+                    chosen_center = self.scaled_bboxs[init_pos_id].mean(0)
+                    chosen_center[2] += 0.1
+                    # embed()
+
+                    noise_pos = torch.randn(3, device=sim.device) * 0.02
+                    init_pos = torch.from_numpy(chosen_center).to(sim.device) + noise_pos
+                    init_pos[2] += 0.02
+
+                    noise_ori = torch.randn(4, device=sim.device) * 0.01
+                    init_orientation = torch.tensor([0., 1., 0., 0.], device=sim.device)
+                    init_orientation = init_orientation + noise_ori
+                    init_orientation = init_orientation / init_orientation.norm()
+                    joint_pos = self.initialize_robot_with_ik(sim, robot, robot_entity_cfg, diff_ik_controller, init_pos, init_orientation, scene)
+
                 # reset actions
                 # ik_commands[:] = ee_goals[current_goal_idx]
                 bbox_pts = deepcopy(self.scaled_bbox).reshape(-1, 3)
@@ -490,11 +634,10 @@ class PlanningDemo:
                 # reset controller
                 diff_ik_controller.reset()
                 diff_ik_controller.set_command(ik_commands)
-                pt_marker_1.visualize(self.scaled_bbox[0])
-                pt_marker_2.visualize(self.scaled_bbox[-1])
+                # pt_marker_1.visualize(self.scaled_bbox[0])
+                # pt_marker_2.visualize(self.scaled_bbox[-1])
 
-                 
-
+                
             else:
                 # obtain quantities from simulation
                 jacobian = robot.root_physx_view.get_jacobians(
@@ -551,7 +694,7 @@ def main(cfg: DictConfig):
     sim_cfg = sim_utils.SimulationCfg(dt=0.01, device=args_cli.device)
     sim = sim_utils.SimulationContext(sim_cfg)
     # Set main camera
-    sim.set_camera_view([0.9, 0.4, 1.0], TARGET_INIT_POS)
+    sim.set_camera_view([0.9, 0.4, 1.5], TARGET_INIT_POS)
     demo = PlanningDemo(**cfg.PlanningDemo)
     # Design scene
     scene_cfg = TableTopSceneCfg(num_envs=args_cli.num_envs, env_spacing=2.0)
