@@ -47,5 +47,5 @@ def calculate_h5_stats(data_dir):
 # 使用示例
 if __name__ == "__main__":
     # 替换为你存放 h5 文件的文件夹路径
-    DATA_DIR = "/home/hhhar/liuliu/vld/data/regression/data_res/" 
+    DATA_DIR = "/media/hhhar/hhd/har/vlddd/100392" 
     calculate_h5_stats(DATA_DIR)

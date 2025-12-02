@@ -25,7 +25,7 @@ intrinsic = np.array([[732.9993,   0.0000, 320.0000],
 
 class H5RobotDataset(Dataset):
     def __init__(self, h5_dir, action_stats_path, chunk_size=10, num_bins=256, 
-                 num_points=1024, vis=False, to_world=False, device='cpu'):
+                 num_points=1024, vis=False, to_world=True, device='cpu'):
         """
         Args:
             h5_file_path (str): 单个 H5 文件的路径 (或者你可以改为接收文件列表)
@@ -59,6 +59,7 @@ class H5RobotDataset(Dataset):
         # 建立索引映射 (Global Index -> File + Local Index)
         # 我们需要知道每个文件的长度，以便在 __getitem__ 中定位
         self.cumulative_sizes = []
+        self.file_lengths = {} # 新增：存储每个文件的长度，用于判断是否是终端 Chunk
         self.total_len = 0
         
         print(f"Indexing {len(self.h5_files)} H5 files...")
@@ -68,6 +69,7 @@ class H5RobotDataset(Dataset):
                 seq_len = f['rgb'].shape[0]
                 self.total_len += seq_len
                 self.cumulative_sizes.append(self.total_len)
+                self.file_lengths[h5_path] = seq_len
         
         print(f"Total frames: {self.total_len}")
 
@@ -158,19 +160,9 @@ class H5RobotDataset(Dataset):
             "matrix": rotation_matrix
         }
 
-    def depth_to_world_pointcloud(self, depth, mask, intrinsic_matrix, camera_pose_4x4):
+    def depth_to_world_pointcloud(self, depth, mask, intrinsic_matrix, camera_pose_4x4, local_idx, pose):
         """
         将 Isaac Lab 的 depth (distance_to_image_plane) 转换为世界坐标系点云。
-
-        参数:
-            depth_tensor (torch.Tensor): (H, W) 深度图
-            intrinsic_matrix (torch.Tensor): (3, 3) 相机内参 K
-            camera_pose_4x4 (torch.Tensor): (4, 4) 相机到世界的变换矩阵 (Camera-to-World Pose)
-            device (str): 运行设备
-            to_world (bool): 是否转换到世界坐标系 (默认 False，只返回相机坐标系下的点云)
-
-        返回:
-            torch.Tensor: (N, 3) 世界坐标系下的点云
         """
         # 1. 数据准备与设备移动
         cam_mat_np = deepcopy(camera_pose_4x4)
@@ -189,7 +181,6 @@ class H5RobotDataset(Dataset):
         cx, cy = intrinsic_matrix[0, 2], intrinsic_matrix[1, 2]
 
         # 3. 生成像素网格 (u, v)
-        # indexing='ij' -> v(行/高), u(列/宽)
         v_grid, u_grid = torch.meshgrid(
             torch.arange(H, dtype=torch.float32),
             torch.arange(W, dtype=torch.float32),
@@ -197,8 +188,6 @@ class H5RobotDataset(Dataset):
         )
 
         # 4. 反投影 (Back-projection) 到相机坐标系
-        # 这里使用的是标准针孔相机模型 (OpenCV Convention)
-        # 坐标系定义: +Z 前, +X 右, +Y 下
         z = depth_tensor
         x = (u_grid - cx) * z / fx
         y = (v_grid - cy) * z / fy
@@ -207,24 +196,14 @@ class H5RobotDataset(Dataset):
         points_cam_cv = torch.stack([x, y, z], dim=-1).reshape(-1, 3)
 
         # 5. 【关键步骤】坐标系修正
-        # Isaac Sim 的 Camera Prim (USD) 坐标系定义为: -Z 前, +Y 上, +X 右
-        # 而上面的计算结果是: +Z 前, +Y 下, +X 右
-        # 必须将点从 "CV Frame" 旋转到 "USD Camera Frame" 才能应用 pose 矩阵
-        # 变换逻辑: x -> x, y -> -y, z -> -z
-
         correction_vector = torch.tensor([1.0, -1.0, -1.0])
         points = points_cam_cv * correction_vector
 
         if self.to_world:
             # 6. 转换到世界坐标系
-            # 提取旋转 R (3x3) 和 平移 T (3)
             R = camera_pose_4x4[:3, :3]
             T = camera_pose_4x4[:3, 3]
 
-            # 应用公式: P_world = R * P_local + T
-            # 矩阵乘法注意: points 是 (N, 3), R 是 (3, 3)
-            # 线性代数写法应为 (R @ points.T).T + T
-            # 简化代码写法为 points @ R.T + T
             points = points @ R.T + T
         else:
             view_matrix = np.linalg.inv(cam_mat_np)
@@ -239,14 +218,12 @@ class H5RobotDataset(Dataset):
         # 降采样或补全到固定点数 (num_points)
         if num_curr >= self.num_points:
             # 降采样: 无放回采样 (replace=False)
-            # torch.randperm 生成 0 到 N-1 的随机排列，取前 num_points 个
             choice = torch.randperm(num_curr, device=points.device)[
                 :self.num_points]
             points = points[choice, :]
         else:
             # 如果点不够，随机重复: 有放回采样 (replace=True)
             if num_curr > 0:
-                # torch.randint 生成 (0, num_curr) 范围内的随机整数索引
                 choice = torch.randint(
                     0, num_curr, (self.num_points,), device=points.device)
                 points = points[choice, :]
@@ -255,7 +232,7 @@ class H5RobotDataset(Dataset):
                 points = torch.zeros((self.num_points, 3),
                                      dtype=points.dtype, device=points.device)
 
-        if self.vis:
+        if self.vis and local_idx==18:
             try:
                 import open3d as o3d
                 print("\n🎨 正在启动 Open3D 可视化窗口...")
@@ -278,6 +255,9 @@ class H5RobotDataset(Dataset):
                 # 添加一个坐标轴 (红X, 绿Y, 蓝Z) 用作世界原点参考
                 origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
                     size=1.0, origin=[0, 0, 0])
+                
+                pose_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+                    size=1.0, origin=pose[0, :3])
 
                 # 为了展示相机位置，我们在相机位置也画个小坐标轴
                 cam_pos_np = camera_pose_4x4[:3, 3].cpu().numpy()
@@ -285,7 +265,7 @@ class H5RobotDataset(Dataset):
                     size=0.5)
                 cam_frame.translate(cam_pos_np)
 
-                o3d.visualization.draw_geometries([pcd_o3d, origin_frame, cam_frame, obb],
+                o3d.visualization.draw_geometries([pcd_o3d, pose_frame, origin_frame, cam_frame, obb],
                                                   window_name="Isaac Lab World Point Cloud")
             except ImportError:
                 print("⚠️ 未安装 Open3D，无法进行点云可视化。请安装 open3d 库后重试。")
@@ -305,17 +285,20 @@ class H5RobotDataset(Dataset):
     def __getitem__(self, idx):
         # 在这里打开文件以支持多线程 DataLoader
         file_path, local_idx = self._locate_file(idx)
+        
+        # 获取当前 H5 文件的总长度
+        current_seq_len = self.file_lengths[file_path]
 
         with h5py.File(file_path, 'r') as f:
             self.bbox = np.array(f["scaled_bbox"][()]).reshape(8, 3)
-            self.seq_len = f['rgb'].shape[0]  # 通常是 30
+            self.seq_len = current_seq_len # f['rgb'].shape[0]  # 通常是 30
             self.action_type = f["action_type"][()].decode('utf-8')
 
             
             # 1. 读取 RGB
             # shape: (480, 640, 3) -> 转为 (3, 480, 640) 并归一化
             rgb = f['rgb'][local_idx]  # uint8
-            if self.vis:
+            if self.vis and local_idx==28:
                 plt.figure(figsize=(10, 6))
                 plt.imshow(rgb)
                 plt.show()
@@ -329,11 +312,15 @@ class H5RobotDataset(Dataset):
             mask = f["semantic_segmentation"][local_idx, :, :, :3]
             cam_mat = f['cam_mat'][:]
             pc_tensor = self.depth_to_world_pointcloud(
-                depth, mask, intrinsic, cam_mat)  # (N, 3)
+                depth, mask, intrinsic, cam_mat, local_idx, f['poses'][local_idx])  # (N, 3)
 
             # 3. 读取动作
              # 我们需要从 local_idx 开始，往后读取 chunk_size 帧
             end_idx = local_idx + self.chunk_size
+            
+            # 判断当前 chunk 是否包含任务的最终帧 (即最后一帧的索引 seq_len - 1)
+            # 如果 end_idx >= current_seq_len，则说明包含或跨越了任务的最终帧，为终端 Chunk
+            is_terminal_chunk = (end_idx >= current_seq_len)
             
             # f['poses'] shape: (Seq_Len, 1, 7)
             
@@ -351,9 +338,9 @@ class H5RobotDataset(Dataset):
                     valid_actions = f['poses'][local_idx : self.seq_len, 0, :] # (Valid, 7)
                     last_action = valid_actions[-1]
                 else:
-                    # 极端情况 (虽然理论上不会进这里)，全部用 0 填充
+                    # 极端情况，全部用 0 填充
                     valid_actions = np.zeros((0, 7))
-                    last_action = np.zeros(7) # 或者上一帧动作
+                    last_action = np.zeros(7) 
 
                 # 2. 构造 Padding
                 pad_len = self.chunk_size - valid_len
@@ -375,7 +362,9 @@ class H5RobotDataset(Dataset):
             "image": image_tensor,
             "point_cloud": pc_tensor,
             "text": text,  # 原始文本，稍后由 Tokenizer 处理
-            "action_tokens": action_tensor
+            "action_tokens": action_tensor,
+            # 新增：标志当前 Chunk 是否包含任务终点
+            "is_terminal_chunk": is_terminal_chunk 
         }
 
 
@@ -393,6 +382,9 @@ class VLDCollator:
         images = torch.stack([item['image'] for item in batch])
         point_clouds = torch.stack([item['point_cloud'] for item in batch])
         action_tokens = torch.stack([item['action_tokens'] for item in batch])
+        # 收集新增的标志位，并转为 Tensor
+        is_terminal_chunk = torch.tensor([item['is_terminal_chunk'] for item in batch], dtype=torch.bool)
+
 
         # 处理文本 Batch Tokenization
         raw_texts = [item['text'] for item in batch]
@@ -403,7 +395,7 @@ class VLDCollator:
             return_tensors="pt"
         )
 
-        return images, point_clouds, text_inputs, action_tokens
+        return images, point_clouds, text_inputs, action_tokens, is_terminal_chunk # <--- 返回标志位
 
 
 class TestH5RobotDatasetChunked(unittest.TestCase):
@@ -503,73 +495,79 @@ class TestH5RobotDatasetChunked(unittest.TestCase):
         
         # Text
         self.assertTrue(isinstance(data['text'], str))
+        
+        # Terminal Flag
+        self.assertTrue(isinstance(data['is_terminal_chunk'], bool))
 
-    def test_03_padding_logic(self):
-        """测试 3: 边界情况 (Padding) 是否正确"""
+    def test_03_terminal_flag(self):
+        """测试 3: Terminal Flag 逻辑是否正确"""
+        # 任务长度: 30, Chunk Size: 10
+        # 索引 0: 0-9。end_idx=10 < 30 -> False
+        self.assertFalse(self.dataset[0]['is_terminal_chunk'])
+        
+        # 索引 19: 19-28。end_idx=29 < 30 -> False
+        self.assertFalse(self.dataset[self.seq_len - self.chunk_size - 1]['is_terminal_chunk'])
+
+        # 索引 20: 20-29。end_idx=30 >= 30 -> True (第一个终端 chunk)
+        self.assertTrue(self.dataset[self.seq_len - self.chunk_size]['is_terminal_chunk'])
+        
+        # 索引 29: 29-38 (Padding)。end_idx=39 >= 30 -> True (最后一个 chunk)
+        self.assertTrue(self.dataset[self.seq_len - 1]['is_terminal_chunk'])
+        
+        print("[Test Terminal Flag] Terminal flag logic verified successfully.")
+
+    def test_04_padding_logic(self):
+        """测试 4: 边界情况 (Padding) 是否正确"""
         # 选取最后一个索引 (idx = 29)
-        # 此时只能读取 1 帧有效数据，剩下 9 帧应该由 Padding 填充
         idx = self.seq_len - 1
         data = self.dataset[idx]
         
         actions = data['action_tokens'] # shape (10, 7)
         
-        # 验证形状
         self.assertEqual(actions.shape, (self.chunk_size, self.n_joints))
         
-        # 验证 Padding 值
-        # 第 0 个元素是真实的最后一帧动作
-        # 第 1 到 9 个元素应该是复制的第 0 个元素
+        # 验证 Padding 值：最后 9 帧动作复制了最后一帧的真实动作
         first_token = actions[0]
         last_token = actions[-1]
         
-        # 检查是否所有行的值都相等 (这意味着 Padding 成功复制了最后一帧)
+        # 由于离散化可能导致值有偏差，这里检查 chunk 内所有 token 是否都等于第一帧的 token
+        # （在只有一帧有效数据时）
         are_equal = torch.all(actions == first_token)
         self.assertTrue(are_equal, "Padding logic failed: padded frames do not match the last valid frame.")
         print(f"[Test Padding] Index {idx}: Action Chunk returned successfully with padding.")
 
-    def test_04_sliding_window(self):
-        """测试 4: 正常情况下的滑动窗口读取"""
+    def test_05_sliding_window(self):
+        """测试 5: 正常情况下的滑动窗口读取"""
         idx = 0
         data = self.dataset[idx]
         actions = data['action_tokens']
         
-        # 由于我们造的数据是 poses[i] = i/100
-        # 第 0 个 chunk 应该包含 pose[0] 到 pose[9]
-        # 对应的 token 值应该是不一样的 (除非 num_bins 太小导致分辨率不够，但这里假设足够)
-        
         # 简单的检查：确保 chunk 里的数据不是全部一样的 (证明读到了序列)
-        # 注意：如果 bin 只有 1 个，那确实会一样，所以这里只是个弱检查
         if self.dataset.num_bins > 10:
             is_all_same = torch.all(actions == actions[0])
             self.assertFalse(is_all_same, "Normal chunking failed: all actions in chunk are identical (expected variation).")
 
-    def test_05_cpu_device_check(self):
-        """测试 5: 验证 Dataset 返回的数据确实在 CPU 上 (防止多进程报错)"""
+    def test_06_cpu_device_check(self):
+        """测试 6: 验证 Dataset 返回的数据确实在 CPU 上 (防止多进程报错)"""
         idx = 5
         data = self.dataset[idx]
         self.assertEqual(data['image'].device.type, 'cpu')
         self.assertEqual(data['point_cloud'].device.type, 'cpu')
         self.assertEqual(data['action_tokens'].device.type, 'cpu')
 
-    def test_06_dataloader_multiprocessing(self):
-        """测试 6: 集成测试 - 放入 DataLoader 并开启多进程"""
+    def test_07_dataloader_multiprocessing(self):
+        """测试 7: 集成测试 - 放入 DataLoader 并开启多进程"""
         print("\n[Test DataLoader] Testing with num_workers=2...")
         
-        # collate_fn 简单 mock 一下，因为 text 是 string，默认 collate 可能会报错或者变成 list
-        def simple_collate(batch):
-            return {
-                'image': torch.stack([b['image'] for b in batch]),
-                'point_cloud': torch.stack([b['point_cloud'] for b in batch]),
-                'action_tokens': torch.stack([b['action_tokens'] for b in batch]),
-                'text': [b['text'] for b in batch]
-            }
+        # Collate Function 必须处理 is_terminal_chunk
+        collator = VLDCollator()
 
         loader = DataLoader(
             self.dataset, 
             batch_size=4, 
             shuffle=True, 
             num_workers=2, # 开启多进程！这是最容易报错的地方
-            collate_fn=simple_collate
+            collate_fn=collator
         )
         
         # 尝试读取一个 batch
@@ -577,7 +575,8 @@ class TestH5RobotDatasetChunked(unittest.TestCase):
             for batch in loader:
                 # 检查 Batch 维度
                 expected_shape = (4, self.chunk_size, self.n_joints)
-                self.assertEqual(batch['action_tokens'].shape, expected_shape)
+                self.assertEqual(batch[3].shape, expected_shape) # action_tokens 是第四个返回项
+                self.assertEqual(batch[4].shape, (4,)) # is_terminal_chunk 是第五个返回项
                 print("[Test DataLoader] Successfully loaded a batch with multiprocessing.")
                 break 
         except RuntimeError as e:
@@ -585,10 +584,11 @@ class TestH5RobotDatasetChunked(unittest.TestCase):
 
 if __name__ == '__main__':
     # unittest.main()
-    h5_path = "/home/hhhar/liuliu/vld/data/regression/data_res/"
+    h5_path = "/media/hhhar/hhd/har/vlddd/100392/"
     stats_path = "/home/hhhar/liuliu/vld/dataset/action_stats.json"
-    dataset = H5RobotDataset(h5_path, stats_path, num_bins=256, vis=True,to_world=True)
+    dataset = H5RobotDataset(h5_path, stats_path, num_bins=256, vis=True,to_world=False)
     for i in range(len(dataset)):
         item = dataset[i]
         print(
-            f"Item {i}: Image {item['image'].shape}, PC {item['point_cloud'].shape}, Action {item['action_tokens']}")
+            f"Item {i}: Image {item['image'].shape}, PC {item['point_cloud'].shape}, \
+                Action {item['action_tokens'].shape}, Terminal: {item['is_terminal_chunk']}")

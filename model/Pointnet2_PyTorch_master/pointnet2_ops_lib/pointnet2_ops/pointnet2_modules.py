@@ -45,6 +45,17 @@ class _PointnetSAModuleBase(nn.Module):
             (B,  \sum_k(mlps[k][-1]), npoint) tensor of the new_features descriptors
         """
 
+        # ==================== 【修改点开始】 ====================
+        # PointNet++ 的底层 C++/CUDA 算子不支持 FP16 (Half)。
+        # 当使用 accelerate 混合精度训练时，必须强制将输入转回 Float32。
+        
+        if xyz.dtype != torch.float32:
+            xyz = xyz.float()
+            
+        if features is not None and features.dtype != torch.float32:
+            features = features.float()
+        # ==================== 【修改点结束】 ====================
+
         new_features_list = []
 
         xyz_flipped = xyz.transpose(1, 2).contiguous()
@@ -181,6 +192,24 @@ class PointnetFPModule(nn.Module):
         new_features : torch.Tensor
             (B, mlp[-1], n) tensor of the features of the unknown features
         """
+
+        # ==================== 【修改点开始】 ====================
+        # 修复 CUDA 扩展不支持 FP16 的问题
+        # three_nn 和 three_interpolate 需要 float32 数据
+        
+        if unknown is not None and unknown.dtype != torch.float32:
+            unknown = unknown.float()
+            
+        if known is not None and known.dtype != torch.float32:
+            known = known.float()
+            
+        if known_feats is not None and known_feats.dtype != torch.float32:
+            known_feats = known_feats.float()
+            
+        # 为了后续能顺利 torch.cat，unknow_feats 最好也统一转为 float
+        if unknow_feats is not None and unknow_feats.dtype != torch.float32:
+            unknow_feats = unknow_feats.float()
+        # ==================== 【修改点结束】 ====================
 
         if known is not None:
             dist, idx = pointnet2_utils.three_nn(unknown, known)

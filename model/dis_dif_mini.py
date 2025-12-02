@@ -14,7 +14,13 @@ class DiscreteDiffusionPolicy(nn.Module):
         hidden_dim: int = 512,      # Transformer 内部维度
         num_layers: int = 6,
         nhead: int = 8,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        # --- 乘法权重参数 (Multiplicative) ---
+        local_mul_weight: float = 1.0,   # 局部乘法权重 (默认 1.0 表示不加权)
+        global_mul_weight: float = 5.0,  # 全局乘法权重 (终端 Chunk)
+        # --- 加法惩罚参数 (Additive) ---
+        local_add_val: float = 0.0,      # 局部加法惩罚值 (默认 0.0 表示不惩罚)
+        global_add_val: float = 3.0      # 全局加法惩罚值 (终端 Chunk)
     ):
         super().__init__()
         self.n_joints = n_joints
@@ -23,6 +29,12 @@ class DiscreteDiffusionPolicy(nn.Module):
         
         self.mask_token_id = num_action_bins 
         self.vocab_size = num_action_bins + 1 
+        
+        # 存储参数
+        self.local_mul_weight = local_mul_weight
+        self.global_mul_weight = global_mul_weight
+        self.local_add_val = local_add_val
+        self.global_add_val = global_add_val
 
         # 1. 特征投影层
         self.state_proj = nn.Linear(state_dim, hidden_dim)
@@ -32,11 +44,10 @@ class DiscreteDiffusionPolicy(nn.Module):
         self.action_embed = nn.Embedding(self.vocab_size, hidden_dim)
         
         # 3. 位置编码
-        # state_pos_embed 长度设为 1，因为你的特征是 1 维的（变成 1 个 token）
         self.state_pos_embed = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.02)
         self.action_pos_embed = nn.Parameter(torch.randn(1, self.total_action_tokens, hidden_dim) * 0.02)
 
-        # 4. Transformer (Decoder-only but bidirectional)
+        # 4. Transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim, nhead=nhead, dim_feedforward=hidden_dim*4, 
             dropout=dropout, activation='gelu', batch_first=True, norm_first=True
@@ -55,22 +66,11 @@ class DiscreteDiffusionPolicy(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def _process_state(self, state_features):
-        """
-        统一处理状态特征，确保它变成 (Batch, Seq_Len=1, Hidden_Dim)
-        """
-        # 如果输入是 (Batch, Dim)，则扩充为 (Batch, 1, Dim)
         if state_features.dim() == 2:
             state_features = state_features.unsqueeze(1)
-        
-        # 投影: (B, 1, Dim) -> (B, 1, Hidden)
         state_embeds = self.state_proj(state_features)
-        
-        # 加上位置编码 (虽然只有一个位置，但这个编码起到了"Modality Embedding"的作用，区分这是图像不是动作)
-        # 注意处理广播机制，如果输入是序列也能兼容
         seq_len = state_embeds.shape[1]
-        # 如果预设的位置编码不够长(针对变长序列)，截取或重复，这里针对你的情况通常是 seq_len=1
         pos_embed = self.state_pos_embed[:, :seq_len, :] if seq_len <= self.state_pos_embed.shape[1] else self.state_pos_embed
-        
         state_embeds = state_embeds + pos_embed
         state_embeds = self.state_norm(state_embeds)
         return state_embeds
@@ -78,25 +78,19 @@ class DiscreteDiffusionPolicy(nn.Module):
     def get_mask_ratio_schedule(self, t_float):
         return math.cos(t_float * math.pi * 0.5)
 
-    def forward(self, state_features: torch.Tensor, action_tokens: torch.Tensor):
-        """
-        state_features: (Batch, state_dim) <-- 只需要传入 2D Tensor
-        action_tokens: (Batch, chunk_size, n_joints)
-        """
+    def forward(self, state_features: torch.Tensor, action_tokens: torch.Tensor, is_terminal_chunk=None):
         B = action_tokens.shape[0]
         device = action_tokens.device
+        L = self.total_action_tokens
         
-        # --- A. 处理 State ---
-        state_embeds = self._process_state(state_features) # (B, 1, H)
-
-        # --- B. 准备 Action Mask ---
-        flat_actions = action_tokens.view(B, -1)
-        L = flat_actions.shape[1]
+        # --- A. Transformer Forward ---
+        state_embeds = self._process_state(state_features) 
         
+        # 准备 Mask
+        flat_actions = action_tokens.view(B, L) 
         u = torch.rand(B, device=device)
         mask_ratios = torch.cos(u * math.pi * 0.5)
         num_masked = (mask_ratios * L).long().clamp(min=1, max=L)
-        
         rand_scores = torch.rand(B, L, device=device)
         mask_indices = rand_scores.argsort(dim=1).argsort(dim=1) < num_masked.unsqueeze(1)
         
@@ -104,166 +98,128 @@ class DiscreteDiffusionPolicy(nn.Module):
         input_ids[mask_indices] = self.mask_token_id
         
         action_embeds = self.action_embed(input_ids) + self.action_pos_embed[:, :L, :]
-        
-        # --- C. 拼接 ---
-        # 现在的拼接形状是: (Batch, 1 + L, Hidden_Dim)
         x = torch.cat([state_embeds, action_embeds], dim=1)
-        
-        # --- D. 预测 ---
         x = self.transformer(x)
         
-        # 截取 Action 部分 (从第 1 个位置开始截取，因为第 0 个是 state)
         action_out = x[:, state_embeds.shape[1]:, :] 
         action_out = self.final_norm(action_out)
         logits = self.predict_head(action_out)
         
-        # --- E. Loss ---
-        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), flat_actions.reshape(-1), reduction='none')
-        mask_flat = mask_indices.view(-1).float()
-        masked_loss = (loss * mask_flat).sum() / (mask_flat.sum() + 1e-6)
+        # --- B. 混合 Loss 计算 ---
         
-        return masked_loss
+        # 1. 基础 Cross Entropy Loss (Batch, L)
+        ce_loss_flat = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)), 
+            flat_actions.reshape(-1), 
+            reduction='none'
+        )
+        ce_loss = ce_loss_flat.view(B, L)
+
+        # 2. 准备两个矩阵：乘法权重矩阵 & 加法惩罚矩阵
+        mul_weights = torch.ones_like(ce_loss)  # 默认为 1.0 (不加权)
+        add_values = torch.zeros_like(ce_loss)  # 默认为 0.0 (不加罚)
+
+        # 3. 设置局部惩罚 (Local): 所有样本的最后一步
+        # 对应的列是最后 n_joints 个
+        if self.local_mul_weight != 1.0:
+            mul_weights[:, -self.n_joints:] = self.local_mul_weight
+        if self.local_add_val != 0.0:
+            add_values[:, -self.n_joints:] = self.local_add_val
+
+        # 4. 设置全局惩罚 (Global): 终端样本的最后一步 (覆盖局部设置)
+        if is_terminal_chunk is not None:
+            terminal_indices = is_terminal_chunk.nonzero(as_tuple=True)[0]
+            
+            if terminal_indices.numel() > 0:
+                row_mask = torch.zeros(B, dtype=torch.bool, device=device)
+                row_mask[terminal_indices] = True
+                col_mask = torch.zeros(1, L, dtype=torch.bool, device=device)
+                col_mask[:, -self.n_joints:] = True 
+                
+                terminal_action_mask = row_mask.unsqueeze(1) & col_mask
+                
+                # 覆盖权重
+                if self.global_mul_weight != 1.0:
+                    mul_weights[terminal_action_mask] = self.global_mul_weight
+                if self.global_add_val != 0.0:
+                    add_values[terminal_action_mask] = self.global_add_val
+
+        # 5. 计算最终矩阵 Loss
+        # Part 1: 加权 CE Loss
+        weighted_ce_loss = ce_loss * mul_weights
+        
+        # Part 2: 加法惩罚 Loss (没到位概率 * 惩罚值)
+        # 没到位概率 = 1.0 - p_correct = 1.0 - exp(-ce_loss)
+        not_arrived_prob = 1.0 - torch.exp(-ce_loss)
+        additive_penalty_loss = not_arrived_prob * add_values
+        
+        # Combine
+        total_loss_matrix = weighted_ce_loss + additive_penalty_loss
+
+        # 6. 应用 Diffusion Mask (只计算被 Mask 掉的部分)
+        mask_flat = mask_indices.float() 
+        final_loss = (total_loss_matrix * mask_flat).sum() / (mask_flat.sum() + 1e-6)
+        
+        return final_loss
 
     @torch.no_grad()
     def sample(self, state_features: torch.Tensor, steps: int = 10):
         B = state_features.shape[0]
         device = state_features.device
         L = self.total_action_tokens
-        
-        # --- A. 处理 State (只算一次) ---
-        state_embeds = self._process_state(state_features) # (B, 1, H)
-        
-        # 初始化：全都是 [MASK]
+        state_embeds = self._process_state(state_features)
         current_ids = torch.full((B, L), self.mask_token_id, device=device, dtype=torch.long)
         
         for step in range(steps):
-            # 计算当前进度 (0.0 -> 1.0)
-            # step=0 -> t=0.1 ... step=9 -> t=1.0
             t = (step + 1) / steps
-            
-            # 根据进度计算剩余需要 Mask 的比例 (MaskGIT Cosine Schedule)
-            # t=0 时 ratio=1.0 (全Mask), t=1 时 ratio=0.0 (全保留)
             mask_ratio = self.get_mask_ratio_schedule(t)
-            
-            # 计算本轮结束后，需要保留多少个 [MASK]
             n_mask = int(L * mask_ratio)
             
-            # --- Forward ---
-            # 1. 正常的 Embedding 和 Transformer 前向传播
             action_embeds = self.action_embed(current_ids) + self.action_pos_embed[:, :L, :]
             x = torch.cat([state_embeds, action_embeds], dim=1)
             x = self.transformer(x)
-            
-            # 2. 拿到预测结果
-            action_out = x[:, state_embeds.shape[1]:, :] # 剥离 state
+            action_out = x[:, state_embeds.shape[1]:, :]
             action_out = self.final_norm(action_out)
-            logits = self.predict_head(action_out) # (B, L, vocab)
+            logits = self.predict_head(action_out)
             
-            # --- Sampling Strategy (核心修改) ---
-            
-            # 3. 获取当前所有位置的预测 Token 和 置信度
             probs = F.softmax(logits, dim=-1)
-            sampled_conf, sampled_ids = probs.max(dim=-1) # (B, L)
-            
-            # 4. 【关键步骤1：填充】
-            # 找出当前仍然是 [MASK] 的位置
+            sampled_conf, sampled_ids = probs.max(dim=-1)
             unknown_mask = (current_ids == self.mask_token_id)
-            
-            # 仅在 unknown 的位置填入新的预测值 (sampled_ids)
-            # 已知的位置保持原样 (current_ids)，不要覆写！
             new_ids = torch.where(unknown_mask, sampled_ids, current_ids)
             
-            # 5. 如果已经到了最后一步 (n_mask == 0)，直接返回填满的结果
             if n_mask == 0:
                 current_ids = new_ids
                 break
             
-            # 6. 【关键步骤2：重新 Mask】
-            # 我们需要选出置信度最低的 n_mask 个位置变回 [MASK]
-            # 但是！必须保护那些在上一轮就已经确定的 Token，防止它们被误删
-            
-            # 初始置信度使用当前预测的概率
             confidence_scores = sampled_conf.clone()
-            
-            # 对于那些本来就"已知"(非 unknown) 的 Token，将其置信度设为无穷大
-            # 这样在排序找"最小值"时，它们永远排在最后，不会被选中
             confidence_scores[~unknown_mask] = 1e9 
-            
-            # 加一点微小的噪音防止 argsort 在置信度相同时的确定性问题（可选）
             confidence_scores += torch.rand_like(confidence_scores) * 1e-4
-            
-            # 选出置信度最低的 n_mask 个位置的索引
-            # topk(largest=False) 返回最小的 k 个值
             _, mask_indices = torch.topk(confidence_scores, k=n_mask, dim=1, largest=False)
-            
-            # 7. 应用 Mask
-            # 这一步只会在那些"刚刚填入但置信度不高"的位置打上 Mask
             current_ids = new_ids.clone()
             row_idx = torch.arange(B, device=device).unsqueeze(1).expand(-1, n_mask)
             current_ids[row_idx, mask_indices] = self.mask_token_id
-            
+           
         return current_ids.view(B, self.chunk_size, self.n_joints)
     
-def test_discrete_diffusion_policy():
-    print("\n========== 开始测试 Discrete Diffusion Policy ==========")
-    
-    # --- 1. 配置参数 ---
-    B = 2                   # Batch Size
-    Context_Len = 16        # 视觉特征序列长度 (例如压缩过的 Token)
-    State_Dim = 768         # 视觉特征维度
-    
-    N_Joints = 7            # 机器人 7 轴
-    Chunk_Size = 10         # 预测未来 10 步
-    Vocab_Size = 256        # 离散 Bin 数
-    
+def test_combined_penalty():
+    print("\n========== 测试 Mixed Penalty Logic ==========")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Running on {device}")
-
-    # --- 2. 实例化模型 ---
+    
+    # 示例配置：
+    # 局部：乘法 1.0 (不加权), 加法 1.0
+    # 全局：乘法 5.0 (强加权), 加法 3.0
     model = DiscreteDiffusionPolicy(
-        n_joints=N_Joints,
-        chunk_size=Chunk_Size,
-        num_action_bins=Vocab_Size,
-        state_dim=State_Dim,
-        hidden_dim=256,
-        num_layers=4,
-        nhead=4
+        n_joints=7, chunk_size=10, num_action_bins=256, state_dim=768,
+        local_mul_weight=1.0, local_add_val=1.0,
+        global_mul_weight=5.0, global_add_val=3.0
     ).to(device)
 
-    print(f"Model created. Total Action Tokens = {model.total_action_tokens}")
+    dummy_state = torch.randn(2, 1, 768).to(device)
+    dummy_actions = torch.randint(0, 256, (2, 10, 7)).to(device)
+    is_terminal = torch.tensor([True, False]).to(device) 
 
-    # --- 3. 构造虚拟数据 (Training Mode) ---
-    # 模拟前置网络输出的特征
-    dummy_state = torch.randn(B, Context_Len, State_Dim).to(device)
-    
-    # 模拟真实的 Ground Truth 动作 (已经离散化为 0-255 的整数)
-    # Shape: (Batch, Time, Joints)
-    dummy_actions_gt = torch.randint(0, Vocab_Size, (B, Chunk_Size, N_Joints)).to(device)
-
-    # --- 4. 训练前向传播 ---
-    loss = model(dummy_state, dummy_actions_gt)
-    print(f"Training Loss: {loss.item():.4f}")
-    
-    loss.backward()
-    print("Backward pass successful.")
-
-    # --- 5. 推理采样 (Inference Mode) ---
-    print("\nStarting Inference Sampling...")
-    model.eval()
-    
-    with torch.no_grad():
-        # 只需要传入 State
-        pred_actions = model.sample(dummy_state, steps=10)
-        
-    print(f"Predicted Action Shape: {pred_actions.shape}")
-    print(f"Expected Shape: ({B}, {Chunk_Size}, {N_Joints})")
-    
-    # 检查是否还有 Mask Token (理想情况下应该没有)
-    has_mask = (pred_actions == model.mask_token_id).any()
-    print(f"Any mask tokens left? {has_mask.item()}")
-
+    loss = model(dummy_state, dummy_actions, is_terminal)
+    print(f"Combined Loss: {loss.item():.4f}")
 
 if __name__ == "__main__":
-    # 假设你已经把上一段的类定义复制到了这里，或者已经import了
-    # 这里直接运行测试
-    test_discrete_diffusion_policy()
+    test_combined_penalty()

@@ -7,7 +7,7 @@ hydra:
 
 # --- 数据集配置 ---
 data:
-  h5_dir: "/home/hhhar/liuliu/vld/data/regression/data_res/"
+  h5_dir: "/media/hhhar/hhd/har/vlddd/100392"
   action_stats_path: "/home/hhhar/liuliu/vld/dataset/action_stats.json"
   num_bins: 256
   # 如果你的 Dataset 支持 chunking，在这里配置
@@ -36,12 +36,17 @@ model:
   diffusion_hidden_dim: 512
   diffusion_layers: 6
 
+  # 惩罚因子
+  local_mul_weight: 2.0
+  global_mul_weight: 5.0
+  local_add_val: 1.0
+  global_add_val: 3.0
+
 # --- 训练超参数 ---
 training:
-  device: "cuda"  # "cuda" or "cpu"
   seed: 42
-  epochs: 100
-  learning_rate: 1e-4
+  epochs: 200
+  learning_rate: 2e-4
   weight_decay: 1e-4
   warmup_steps: 500
   
@@ -53,4 +58,4 @@ training:
 # --- Checkpoint ---
 checkpoint:
   resume: false
-  path: ""  # 如果 resume=true，填入 checkpoint 路径
+  path: ""  # 如果 resume: true，填入 checkpoint 路径

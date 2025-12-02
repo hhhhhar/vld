@@ -17,7 +17,7 @@ runner:
 
 # 模型配置 (必须与训练时一致)
 path:
-  checkpoint_path: "/home/hhhar/liuliu/vld/cps/2025_11_27_18:12/checkpoint_final.pth"  # 替换为你训练好的权重路径
+  checkpoint_path: "/media/hhhar/hhd/har/vlddd/cps/2025_12_01_20:47/checkpoint_epoch_105_0.3008.pth"  # 替换为你训练好的权重路径
   action_stats_path: "/home/hhhar/liuliu/vld/dataset/action_stats.json"   # 替换为你的统计量文件路径
   
   # 网络参数

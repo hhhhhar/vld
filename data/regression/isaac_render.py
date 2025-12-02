@@ -32,6 +32,9 @@ parser.add_argument("--robot", type=str,
                     default="franka_panda", help="Name of the robot.")
 parser.add_argument("--num_envs", type=int, default=1,
                     help="Number of environments to spawn.")
+parser.add_argument("--gpu_id", type=int, default=2,
+                    help="GPU device index to use.")
+
 # parser.add_argument("--enable_cameras", type=bool, default=True)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -284,6 +287,7 @@ class PlanningDemo:
         target_id = turn // 20
         if target_id >= len(self.scaled_bboxs):
             self.over = True
+            return 0
 
         self.scaled_bbox = np.array(self.scaled_bboxs[target_id]).reshape(-1, 1, 3)
         self.data_dict["scaled_bbox"] = self.scaled_bbox
@@ -613,13 +617,15 @@ class PlanningDemo:
 
                     noise_pos = torch.randn(3, device=sim.device) * 0.02
                     init_pos = torch.from_numpy(chosen_center).to(sim.device) + noise_pos
-                    init_pos[2] += 0.02
+                    init_pos[2] += 0.04
 
                     noise_ori = torch.randn(4, device=sim.device) * 0.01
                     init_orientation = torch.tensor([0., 1., 0., 0.], device=sim.device)
                     init_orientation = init_orientation + noise_ori
                     init_orientation = init_orientation / init_orientation.norm()
                     joint_pos = self.initialize_robot_with_ik(sim, robot, robot_entity_cfg, diff_ik_controller, init_pos, init_orientation, scene)
+                else:
+                    self.robot.reset()
 
                 # reset actions
                 # ik_commands[:] = ee_goals[current_goal_idx]

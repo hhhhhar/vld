@@ -80,9 +80,18 @@ bbox_pts_cfg = VisualizationMarkersCfg(
     prim_path="/World/Visuals/testMarkers",
     markers={
         "marker1": sim_utils.SphereCfg(
-            radius=0.005,
+            radius=0.008,
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(1.0, 0.0, 0.0)),
+        ), })
+
+bbox_pts_cfg_b = VisualizationMarkersCfg(
+    prim_path="/World/Visuals/testMarkers",
+    markers={
+        "marker1": sim_utils.SphereCfg(
+            radius=0.008,
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.0, 1.0, 0.0)),
         ), })
 
 @configclass
@@ -163,6 +172,11 @@ class VLDInferenceAgent:
         self.action_type = []
         self.bbox_info = []
         self.action_queue = [] 
+        self.scaled_bboxs = []
+        self.action_types = []
+        self.part_num = -1
+
+        self.get_bboxs()
         
         # 1. 加载统计量 (Min/Max) 用于反归一化
         print(f"Loading stats from {cfg.path.action_stats_path}")
@@ -188,6 +202,32 @@ class VLDInferenceAgent:
 
         self.step_counter = 0
         self.action_queue = [] # 用于 Receding Horizon Control
+    
+    def get_bboxs(self, pos=TARGET_INIT_POS, rot=TARGET_INIT_ROT, scale=TARGET_SCALE):
+        anno_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.cfg.sim.item_id}/link_annotation_gapartnet.json"
+        with open(anno_path, "r") as f:
+            annos = json.load(f)
+            self.part_num = len(annos)
+
+        for anno in annos:
+            if anno["is_gapart"] == False:
+                continue
+            bbox = anno['bbox']
+            self.scaled_bboxs.append(transform_points_by_pose(bbox, pos, rot, scale))
+            if anno['category'] == "slider_button":
+                self.action_types.append('press')
+            else:
+                self.action_types.append("rot")
+    
+    def choose_part(self):
+        target_id = random.randint(0, len(self.scaled_bboxs) - 1)
+
+        self.scaled_bbox = np.array(self.scaled_bboxs[target_id]).reshape(-1, 3)
+        self.bbox_info = self.convert_bbox_8points_to_pose(self.scaled_bbox)
+        bbox_info = deepcopy(self.bbox_info)
+        del bbox_info["matrix"]  # 删除矩阵，保留中心、尺寸、四元数
+        
+        return f"action: {self.action_types[target_id]}, target_area: {bbox_info}"
 
     def get_txts_bbox_at(self, pos=TARGET_INIT_POS, rot=TARGET_INIT_ROT, scale=TARGET_SCALE):
         anno_path = f"/home/hhhar/liuliu/vld/assets/articulation/{self.cfg.sim.item_id}/link_annotation_gapartnet.json"
@@ -393,6 +433,7 @@ class VLDInferenceAgent:
         pcs = torch.stack(pcs) # (B, 1024, 3)
 
         raw_texts = obs_dict['instruction'] # List[str]
+        print(raw_texts)
         text_inputs = self.tokenizer(
             raw_texts,
             padding=True,
@@ -539,16 +580,157 @@ class EvaluationRunner:
         self.txts = []
         self.goal_marker = None
         self.pt_marker = None
+        self.init_marker = None
+
+    def initialize_robot_with_ik(self, target_pos_w, target_quat_w, max_iters=20):
+        """
+        使用 IK 求解器在这一帧"瞬间"算出目标位置的关节角，并将其设为机器人的默认初始姿态。
+        
+        原理：在内部运行一个小的收敛循环，利用 IK 迭代逼近目标，避免直接 Set 导致的瞬移误差或抽搐。
+
+        Args:
+            robot: Articulation 对象
+            robot_entity_cfg: 包含 joint_ids, body_ids 的配置对象
+            ik_controller: DifferentialIKController 实例
+            target_pos_w: 世界坐标系下的目标位置 (num_envs, 3)
+            target_quat_w: 世界坐标系下的目标姿态 (num_envs, 4)
+            scene: InteractiveScene 对象 (用于在循环内刷新数据)
+            max_iters: 内部收敛循环的次数，通常 20 次足够收敛
+            
+        Returns:
+            final_joint_pos: 收敛后的关节角度 (num_envs, num_joints)
+        """
+        sim = self.sim
+        robot = self.robot
+        robot_entity_cfg = self.robot_entity_cfg
+        ik_controller = self.controller
+        scene = self.scene
+        
+        print(f"[IK Init] Starting IK convergence loop ({max_iters} iters)...")
+        
+        # 1. 准备数据
+        # 获取机械臂末端的 body index (通常配置里只有一个 body_id 对应 ee)
+        ee_body_idx = robot_entity_cfg.body_ids[0]
+        # 获取受控关节的 indices
+        arm_joint_indices = robot_entity_cfg.joint_ids
+        
+        # 临时保存物理步长，循环里用
+        sim_dt = scene.physics_dt
+        
+        # 2. 坐标系预处理：将目标从 World Frame 转为 Base Frame (假设 Controller 需要 Base Frame)
+        # 这是一个初始转换，但由于 Robot Base 可能在移动（虽然初始化时一般不动），
+        # 我们最好在循环里动态计算，但为了性能，初始化时算一次通常也可以。
+        # 这里我们在循环外先准备好目标的 Tensor
+        
+        # --- A. 获取当前物理状态 ---
+        # 必须读 robot.data，它是缓存的数据
+        root_pose_w = robot.data.root_pose_w
+        ee_pose_w = robot.data.body_pose_w[:, ee_body_idx]
+        jacobian = robot.root_physx_view.get_jacobians(
+            )[:, ee_body_idx, :, arm_joint_indices]
+        current_arm_joint_pos = robot.data.joint_pos[:, arm_joint_indices]
+        
+        # 计算目标在基座坐标系下的位置 (每一帧都算一下，防止基座有微小滑动)
+        target_pos_b, target_quat_b = subtract_frame_transforms(
+            root_pose_w[:, 0:3], root_pose_w[:, 3:7], 
+            target_pos_w.unsqueeze(0).float(), target_quat_w.unsqueeze(0).float()
+        )
+
+        # --- C. 计算 IK ---
+        # 拼接目标指令
+        ik_commands = torch.cat([target_pos_b, target_quat_b], dim=-1)
+        ik_controller.reset()
+        ik_controller.set_command(ik_commands)
+
+        for i in range(max_iters):
+        
+            # 计算当前末端在基座坐标系下的位置
+            jacobian = robot.root_physx_view.get_jacobians(
+                )[:, ee_body_idx, :, arm_joint_indices]
+            current_arm_joint_pos = robot.data.joint_pos[:, arm_joint_indices]
+            ee_pose_w = robot.data.body_pose_w[:, ee_body_idx]
+            ee_pos_b, ee_quat_b = subtract_frame_transforms(
+                root_pose_w[:, 0:3], root_pose_w[:, 3:7], 
+                ee_pose_w[:, 0:3], ee_pose_w[:, 3:7]
+            )
+            
+            # 计算下一步的关节位置
+            desired_arm_pos = ik_controller.compute(
+                ee_pos_b, ee_quat_b, jacobian, current_arm_joint_pos
+            )
+
+            # --- D. 拼接完整关节状态 (Arm + Gripper) ---
+            # 我们不能只改 Arm，必须保留 Gripper 状态，或者设为默认
+            # 最好是拿当前的 default_joint_pos 作为底板
+            full_joint_pos = robot.data.default_joint_pos.clone()
+            
+            # 覆盖手臂部分的关节角度
+            # 注意：这里假设 robot_entity_cfg.joint_ids 对应的就是 arm 的索引
+            full_joint_pos[:, arm_joint_indices] = desired_arm_pos
+
+            # --- E. 强制瞬移 (Teleport) ---
+            # 将速度设为 0，防止物理引擎计算出巨大的惯性# apply actions
+            robot.set_joint_position_target(
+                desired_arm_pos, joint_ids=robot_entity_cfg.joint_ids)
+            # scene.write_data_to_sim()
+            # sim.step()
+            # robot.write_joint_state_to_sim(full_joint_pos, torch.zeros_like(full_joint_pos))
+            scene.write_data_to_sim()
+            sim.step(render=False)
+            
+            # --- F. 步进物理 (Step Physics) ---
+            # 这一步至关重要！它让 PhysX 更新 Jacobian 和刚体位置
+            # render=False 保证速度极快
+            scene.update(sim_dt)
+
+        # 3. 循环结束，收尾工作
+        print("[IK Init] Convergence finished.")
+        
+        # 获取最终算出来的这个比较完美的关节角度
+        final_joint_pos = robot.data.joint_pos.clone()
+        
+        # 关键：更新默认位置。这样下次你调用 robot.reset() 时，它就会回到这里，而不是回到配置文件里的默认姿态
+        robot.data.default_joint_pos = final_joint_pos
+        robot.data.default_joint_vel = torch.zeros_like(final_joint_pos)
+
+        # 关键：重置控制器内部状态 (积分项等)，防止之前的累积误差影响接下来的正式控制
+        ik_controller.reset()
+        
+        # 最后做一次正式的 Reset，确保一切同步
+        robot.reset()
+        scene.update(dt=0.0) # 刷新 Buffer
+        
+        return final_joint_pos
+
 
     def reset_env(self):
         """重置环境、机器人、控制器和 Agent"""
         print(f"[INFO] Resetting environment... (Round {self.round_count})")
         
         # 1. 重置 Robot 关节状态
+        init_pos_id = np.random.randint(0, self.agent.part_num)
+        center = -1
         joint_pos = self.robot.data.default_joint_pos.clone()
         joint_vel = self.robot.data.default_joint_vel.clone()
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel)
-        self.robot.reset()
+        if init_pos_id < len(self.agent.scaled_bboxs):
+            chosen_center = self.agent.scaled_bboxs[init_pos_id].mean(0)
+            chosen_center[2] += 0.1
+            # embed()
+
+            noise_pos = torch.randn(3, device=self.sim.device) * 0.02
+            init_pos = torch.from_numpy(chosen_center).to(self.sim.device) + noise_pos
+            init_pos[2] += 0.04
+
+            self.init_marker.visualize(init_pos.cpu().numpy().reshape(-1, 3))
+
+            noise_ori = torch.randn(4, device=self.sim.device) * 0.01
+            init_orientation = torch.tensor([0., 1., 0., 0.], device=self.sim.device)
+            init_orientation = init_orientation + noise_ori
+            init_orientation = init_orientation / init_orientation.norm()
+            joint_pos = self.initialize_robot_with_ik(init_pos, init_orientation)
+        else:
+            self.robot.reset()
         
         # 2. 重置目标物体 (MyNewObject)
         # 如果需要随机位置，可以在这里生成新的 Pose 并 write_root_pose_to_sim
@@ -575,10 +757,20 @@ class EvaluationRunner:
         self.scene.write_data_to_sim()
         self.sim.step()
 
-        self.txts = [self.agent.get_txts_bbox_at()] * self.cfg.sim.num_envs
+        self.txts = [self.agent.choose_part()] * self.cfg.sim.num_envs
 
     def run(self):
         """主循环"""
+        # Markers
+        frame_marker_cfg = FRAME_MARKER_CFG.copy()
+        frame_marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
+        self.goal_marker = VisualizationMarkers(
+            frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
+        self.pt_marker = VisualizationMarkers(
+            bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points"))
+        self.init_marker = VisualizationMarkers(
+            bbox_pts_cfg_b.replace(prim_path="/Visuals/bbox_points"))
+        
         self.reset_env() # 初始重置
 
         # 设置相机的固定位姿 (Eye-to-hand)
@@ -588,13 +780,6 @@ class EvaluationRunner:
         self.camera.set_world_poses_from_view(camera_positions, camera_targets)
         cam_mats = [cal_cammat(camera_positions[0], camera_targets[0])] * self.cfg.sim.num_envs
 
-        # Markers
-        frame_marker_cfg = FRAME_MARKER_CFG.copy()
-        frame_marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
-        self.goal_marker = VisualizationMarkers(
-            frame_marker_cfg.replace(prim_path="/Visuals/ee_goal"))
-        self.pt_marker = VisualizationMarkers(
-            bbox_pts_cfg.replace(prim_path="/Visuals/bbox_points"))
 
         while simulation_app.is_running():
             # 判断是否需要开启新一轮

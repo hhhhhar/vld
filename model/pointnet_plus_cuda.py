@@ -80,6 +80,18 @@ class PointNetPlus(nn.Module):
         """
         # xyz, features = self._break_up_pc(pointcloud)
         # embed()
+
+        # ==================== 【修改点开始】 ====================
+        # PointNet++ 的底层 C++/CUDA 算子不支持 FP16 (Half)。
+        # 当使用 accelerate 混合精度训练时，必须强制将输入转回 Float32。
+        
+        if xyz.dtype != torch.float32:
+            xyz = xyz.float()
+            
+        if features is not None and features.dtype != torch.float32:
+            features = features.float()
+        # ==================== 【修改点结束】 ====================
+
         l_xyz, l_features = [xyz], [features]
         for i in range(len(self.SA_modules)):
             li_xyz, li_features = self.SA_modules[i](l_xyz[i], l_features[i])
