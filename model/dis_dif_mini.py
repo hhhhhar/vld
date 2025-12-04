@@ -151,6 +151,9 @@ class DiscreteDiffusionPolicy(nn.Module):
         # Part 2: 加法惩罚 Loss (没到位概率 * 惩罚值)
         # 没到位概率 = 1.0 - p_correct = 1.0 - exp(-ce_loss)
         not_arrived_prob = 1.0 - torch.exp(-ce_loss)
+        mean_prob = not_arrived_prob.mean()   
+        with open("prob.txt", "a") as f:   # ← 使用 a
+            f.write(f"{mean_prob.item()}\n")
         additive_penalty_loss = not_arrived_prob * add_values
         
         # Combine
@@ -192,7 +195,8 @@ class DiscreteDiffusionPolicy(nn.Module):
                 break
             
             confidence_scores = sampled_conf.clone()
-            confidence_scores[~unknown_mask] = 1e9 
+            alpha = 1.2 # 优势系数
+            confidence_scores[~unknown_mask] *= alpha
             confidence_scores += torch.rand_like(confidence_scores) * 1e-4
             _, mask_indices = torch.topk(confidence_scores, k=n_mask, dim=1, largest=False)
             current_ids = new_ids.clone()

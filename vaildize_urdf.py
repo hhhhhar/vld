@@ -160,9 +160,9 @@ def sanitize_urdf_and_update_meshes(in_urdf: Path, out_urdf: Path, assets_dir: P
 
 def main():
     parser = argparse.ArgumentParser(description='Sanitize assets and URDF for Isaac Sim / USD import')
-    parser.add_argument('--assets-dir', default="/home/hhhar/liuliu/vld/100392_test/textured_objs", help='Path to directory containing asset files (meshes/textures)')
-    parser.add_argument('--input-urdf', default="/home/hhhar/liuliu/vld/100392_test/mobility_annotation_gapartnet.urdf", help='Input URDF file path')
-    parser.add_argument('--output-urdf', default="/home/hhhar/liuliu/vld/100392_test/renamed.urdf", help='Output sanitized URDF file path')
+    parser.add_argument('--assets-dir', default="/home/hhhar/liuliu/dige/47648/textured_objs", help='Path to directory containing asset files (meshes/textures)')
+    parser.add_argument('--input-urdf', default="/home/hhhar/liuliu/dige/47648/mobility.urdf", help='Input URDF file path')
+    parser.add_argument('--output-urdf', default="/home/hhhar/liuliu/dige/47648/renamed.urdf", help='Output sanitized URDF file path')
     args = parser.parse_args()
 
     assets_dir = Path(args.assets_dir)

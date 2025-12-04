@@ -433,7 +433,6 @@ class VLDInferenceAgent:
         pcs = torch.stack(pcs) # (B, 1024, 3)
 
         raw_texts = obs_dict['instruction'] # List[str]
-        print(raw_texts)
         text_inputs = self.tokenizer(
             raw_texts,
             padding=True,

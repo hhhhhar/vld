@@ -25,7 +25,7 @@ intrinsic = np.array([[732.9993,   0.0000, 320.0000],
 
 class H5RobotDataset(Dataset):
     def __init__(self, h5_dir, action_stats_path, chunk_size=10, num_bins=256, 
-                 num_points=1024, vis=False, to_world=True, device='cpu'):
+                 num_points=1024, vis=False, to_world=True):
         """
         Args:
             h5_file_path (str): 单个 H5 文件的路径 (或者你可以改为接收文件列表)
@@ -42,7 +42,6 @@ class H5RobotDataset(Dataset):
         self.bbox = []
         self.action_type = []
         self.to_world = to_world
-        self.device = device
 
         # 获取所有 H5 文件并排序 (确保跨平台顺序一致)
         self.h5_files = sorted(glob.glob(os.path.join(h5_dir, "*.h5")))
@@ -298,7 +297,7 @@ class H5RobotDataset(Dataset):
             # 1. 读取 RGB
             # shape: (480, 640, 3) -> 转为 (3, 480, 640) 并归一化
             rgb = f['rgb'][local_idx]  # uint8
-            if self.vis and local_idx==28:
+            if self.vis and local_idx==18:
                 plt.figure(figsize=(10, 6))
                 plt.imshow(rgb)
                 plt.show()
@@ -586,9 +585,10 @@ if __name__ == '__main__':
     # unittest.main()
     h5_path = "/media/hhhar/hhd/har/vlddd/100392/"
     stats_path = "/home/hhhar/liuliu/vld/dataset/action_stats.json"
-    dataset = H5RobotDataset(h5_path, stats_path, num_bins=256, vis=True,to_world=False)
+    dataset = H5RobotDataset(h5_path, stats_path, num_bins=256, vis=True,to_world=True)
     for i in range(len(dataset)):
-        item = dataset[i]
-        print(
-            f"Item {i}: Image {item['image'].shape}, PC {item['point_cloud'].shape}, \
-                Action {item['action_tokens'].shape}, Terminal: {item['is_terminal_chunk']}")
+        if i % 600 == 18:
+            item = dataset[i]
+            print(
+                f"Item {i}: Image {item['image'].shape}, PC {item['point_cloud'].shape}, \
+                    Action {item['action_tokens'].shape}, Terminal: {item['is_terminal_chunk']}")

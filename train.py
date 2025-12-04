@@ -6,6 +6,7 @@ import hydra
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from transformers import get_cosine_schedule_with_warmup
 from torch.utils.data import DataLoader
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
@@ -99,12 +100,17 @@ def main(cfg: DictConfig):
         weight_decay=cfg.training.weight_decay
     )
     
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=cfg.training.epochs, 
-        eta_min=1e-6
-    )
+    steps_per_epoch = len(dataloader) 
+    num_training_steps = cfg.training.epochs * steps_per_epoch
 
+    num_warmup_steps = int(num_training_steps * cfg.training.warmup_ratio)
+
+    # 3. 替换 Scheduler
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps
+    )
     # ------------------------------------------------------------------
     # 5. 使用 Accelerate Prepare
     # ------------------------------------------------------------------
@@ -181,6 +187,7 @@ def main(cfg: DictConfig):
                 accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
+            scheduler.step()
             
             # 记录日志
             # 使用 accelerator.reduce 聚合多卡 loss 可能会更准确，但简单起见，这里继续累加本卡 loss
@@ -197,8 +204,6 @@ def main(cfg: DictConfig):
                     # 这里可以添加 TensorBoard logging
                     pass
         
-        # Scheduler Step
-        scheduler.step()
         
         # 计算平均 Loss
         # 注意：这里计算的是单卡平均 Loss，如果需要全局平均，需要使用 accelerator.reduce
